@@ -1,0 +1,26 @@
+# Editor & IDE configurations
+.vscode/
+.idea/
+*.swp
+*~
+
+# Tooling & local caches
+.depatlas-store/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Julia profiling and coverage metrics
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# Julia package documentation builds
+docs/build/
+docs/site/
+
+# Compiled libraries / binaries (if any)
+*.so
+*.dylib
+*.dll
