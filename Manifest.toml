@@ -2,7 +2,7 @@
 
 julia_version = "1.13.0"
 manifest_format = "2.1"
-project_hash = "d2d026c1f04a74cf23235d3e97dfac5b4369efab"
+project_hash = "f75e9f3702b6f5372fafeafd4d6214140cfbc9fb"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -2378,6 +2378,22 @@ version = "1.0.2"
 [[deps.Unicode]]
 uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
 version = "1.11.0"
+
+[[deps.Unitful]]
+deps = ["Dates", "LinearAlgebra", "Random"]
+git-tree-sha1 = "1f0f9f401753701a7e4113b5056ca38d33875b55"
+registries = "General"
+uuid = "1986cc42-f94f-5a68-af5c-568840ba703d"
+version = "1.29.0"
+weakdeps = ["ConstructionBase", "ForwardDiff", "InverseFunctions", "LaTeXStrings", "Latexify", "NaNMath", "Printf"]
+
+    [deps.Unitful.extensions]
+    ConstructionBaseUnitfulExt = "ConstructionBase"
+    ForwardDiffExt = "ForwardDiff"
+    InverseFunctionsUnitfulExt = "InverseFunctions"
+    LatexifyExt = ["Latexify", "LaTeXStrings"]
+    NaNMathExt = "NaNMath"
+    PrintfExt = "Printf"
 
 [[deps.WeakCacheSets]]
 git-tree-sha1 = "386050ae4353310d8ff9c228f83b1affca2f7f38"

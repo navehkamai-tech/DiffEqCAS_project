@@ -1,158 +1,97 @@
 #=
 this is a CAS I'm building to handle and manipulate systems of Differential equations.
-the goal is for it to be quite general and be able to handle all systems of any order, with any number of equations, independent variables, dependent variables, and so forth
+the goal is for it to be quite general and be able to handle all systems of any order, with any number of equations, ivendent variables, dvendent variables, and so forth
 in addition my aim is to have leave the possibility of numeric computation open for the future, so design choices must be made with that in mind
 =#
-using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets
+using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unitful
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute
 import SymbolicUtils: maketerm, @rule, @acrule
 
+#defining sign metadata for symbols
+@enum SignState positive negative undetermined
+struct VariableSign end
+Symbolics.option_to_metadata_type(::Val{:sign}) = VariableSign
 
-struct DiffEq
-    eqs::Vector{Symbolics.Equation}
-    indeps::Vector{Symbolics.Num}
-    deps::Vector{Symbolics.Num}
-    params::Vector{Symbolics.Num}
-    bcs::Vector{Symbolics.Equation}
-    domains::Pair{Any,DomainSets.Domain}
+function get_sign(var)
+    var_unwrapped = Symbolics.unwrap(var)
 
-    function DiffEq(
-        eqs::Vector{Symbolics.Equation},
-        indeps::Vector{Symbolics.Num},
-        deps::Vector{Symbolics.Num},
-        params::Vector{Symbolics.Num}=Symbolics.Num[],
-        bcs::Vector{Symbolics.Equation}=Symbolics.Equation[],
-        domains::Vector{Pair{Any,DomainSets.Domain}}=Pair{Any,DomainSets.Domain}[] # Default to an empty array
-    )
-        # If the user provides no domains, automatically fallback to mapping 
-        # every independent variable to the entire real line
-        if isempty(domains)
-            domains = [var::Any => DomainSets.FullSpace(Float64) for var in indeps]
-        end
-
-        new(eqs, indeps, deps, params, bcs, domains)
-    end
-end
-
-# struct helpers
-function build_system(eqs::Vector{Symbolics.Equation}, deps::Vector{Symbolics.Num}, bcs::Vector{Symbolics.Equation}=Symbolics.Equation[]) #
-    indeps_set = Set{Symbolics.Num}()
-    for dep in deps
-        unwrapped_dep = unwrap(dep)
-        # Check if it's a function like u(x, t)
-        if SymbolicUtils.istree(unwrapped_dep)
-            args = SymbolicUtils.arguments(unwrapped_dep)
-            # Wrap the arguments back into Symbolics.Num and store them
-            union!(indeps_set, wrap.(args))
-        else
-            throw(ArgumentError("Dependent variables must be defined as functions, e.g., u(x, t)"))
-        end
+    if var_unwrapped isa Real
+        return var_unwrapped > 0 ? positive : (var_unwrapped < 0 ? negative : undetermined)
     end
 
-    indeps = collect(indeps_set)
-    params = extract_parameters(Tuple(vcat(eqs, bcs)), vcat(indeps, deps)) #[cite: 1]
-
-    return DiffEq(eqs, indeps, deps, params, bcs) #[cite: 1]
+    # Otherwise, query the metadata
+    return Symbolics.getmetadata(var_unwrapped, VariableSign, undetermined)
 end
 
-function addtodiffeq(sys::DiffEq, field::Symbol, addition::Vector)
-    if field == :domain || field == :domains
-        throw(ArgumentError("Domain additions are ambiguous. Use `change_domain` instead."))
-    end
-
-    # Create new vectors by concatenating the addition if the field matches, 
-    # otherwise retain the existing data from the struct[cite: 1].
-    new_eqs = field == :eqs ? vcat(sys.eqs, addition) : sys.eqs
-    new_indeps = field == :indeps ? vcat(sys.indeps, addition) : sys.indeps
-    new_deps = field == :deps ? vcat(sys.deps, addition) : sys.deps
-    new_params = field == :params ? vcat(sys.params, addition) : sys.params
-    new_bcs = field == :bcs ? vcat(sys.bcs, addition) : sys.bcs
-
-    # Rebuild and return the new struct
-    # (Assuming you updated DiffEq to include the `domains` field as previously discussed)
-    return DiffEq(new_eqs, new_indeps, new_deps, new_params, new_bcs, sys.domains)
-end
-
-function change_domain(sys::DiffEq, new_domains::Vector{Pair})
-    # completely overwrite the domains field while preserving everything else
-    return DiffEq(sys.eqs, sys.indeps, sys.deps, sys.params, sys.bcs, new_domains)
-end
-
-function D(var::Symbolics.Num, order::Int)
-    return Differential(var, order)
-end
+#operator used for boundary conditions
+@register_symbolic Restrict(expr, domain)
+SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
 
 #defining special functions
 #Dirac Delta function
-@register_symbolic Dirac(x::Symbolics.Num, n::Int)
-@register_symbolic Dirac(x::Symbolics.Num)
-@register_symbolic Dirac(x::AbstractVector, n::AbstractVector)
-@register_symbolic Dirac(x::AbstractVector)
+@register_symbolic Dirac(x::Union{Symbolics.Num,AbstractVector}, n::Int)
+@register_symbolic Dirac(x::Union{Symbolics.Num,AbstractVector})
 
 #Heaviside step function
-@register_symbolic Heaviside(x::Real)
+@register_symbolic Heaviside(x::Union{AbstractVector,Symbolics.Num})
 
-function special_rewriter(params=[])
-    is_scalar(x) = any(isequal(x, p) for p in params) || x isa Number
+function special_rewriter()
+    notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
 
     function is_array_literal(x)
         return SymbolicUtils.istree(x) && SymbolicUtils.operation(x) === SymbolicUtils.array_literal
     end
 
+    diff_op_rules = [
+        @rule(Differential(~y)(Differential(~x)(~f)) =>
+            string(~x) < string(~y) ? Differential(~x)(Differential(~y)(~f)) : nothing)
+    ]
     dirac_rules = [
         #multivariate rules
         @rule(Dirac(~x) => is_array_literal(~x) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el), 0)) for el in SymbolicUtils.arguments(~x)[2:end]]) : nothing),
         @rule(Dirac(~x, ~n) => (is_array_literal(~x) && ~n isa AbstractArray) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el_x), el_n)) for (el_x, el_n) in zip(SymbolicUtils.arguments(~x)[2:end], ~n)]) : nothing),
         #rule for easier definition
-        @rule(Dirac(~x) => !is_array_literal(~x) ? Symbolics.unwrap(Dirac(Symbolics.wrap(~x), 0)) : nothing),
+        @rule(Dirac(~x) => Dirac(~x, 0)),
         #algebraic rules
-        @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Symbolics.unwrap(Dirac(Symbolics.wrap(~x), ~n))),
-        @acrule(Dirac(~a::is_scalar * ~x, ~n) => Symbolics.unwrap(Dirac(Symbolics.wrap(~x), ~n)) / (abs(~a) * (~a)^(~n))),
-        @acrule(Dirac(~a::is_scalar*(~x - ~c::Number), ~n) => Symbolics.unwrap(Dirac(Symbolics.wrap(~x - ~c), ~n))/(abs(~a)*(~a)^(~n))),
-        @acrule(~x*Dirac(~x, 0) => 0),
-        @acrule(~x * Dirac(~x, ~n) => -(~n)*Symbolics.unwrap(Dirac(Symbolics.wrap(~x), ~n-1))),
+        @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Dirac(~x, ~n)),
+        @acrule(Dirac(~a::notavariable * ~x, ~n) => Dirac(~x, ~n) / (abs(~a) * (~a)^(~n))),
+        @acrule(Dirac(~a::notavariable*(~x - ~c::Number), ~n) => Dirac(~x - ~c, ~n)/(abs(~a)*(~a)^(~n))),
+        @rule(~x*Dirac(~x, 0) => 0),
+        @rule(~x * Dirac(~x, ~n) => -(~n)*Dirac(~x, ~n-1)),
         #sifting rules
-        # *needs to be generalized for Dirac functions of more than one variable later on
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Domain)(~f*Dirac(~var - ~c, ~n)) => ~c ∈ ~domain ? substitute((-1)^(~n)*expand_derivatives(Differential(~var, ~n)((~f))), Dict(~var => ~c)) : 0),
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Domain)(Dirac(~var - ~c, ~n)) => (~c ∈ ~domain)&&((~n)==0) ? 1 : 0),
+        @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f * Dirac(~vars - ~c)) =>
+            ~c ∈ ~domain ? substitute(~f, Dict(Symbolics.unwrap.(~vars) .=> Symbolics.unwrap.(~c))) : 0),
+        @rule(Integral(~vars, ~domain::DomainSets.Domain)(Dirac(~vars - ~c)) =>
+            ~c ∈ ~domain ? 1 : 0),
         #derivative rule
         @rule(Differential(~var, ~k)(Dirac(~var, ~n)) => Dirac(~var, ~n+~k))
     ]
     heaviside_rules = [
         #algebraic rules
         @rule(Heaviside(-(~x)) => 1-Heaviside(~x)),
-        @acrule(Heaviside(~a::Real * ~x) =>
-            ~a>0 ? Heaviside(~x) :
-            ~a<0 ? 1-Heaviside(~x) : 0.5),
-        @rule(Heaviside(~x)^~k::Number => ~k > 0 ? Heaviside(~x) : nothing),
+        @acrule(Heaviside(~a::notavariable * ~x) => Heaviside(~x) where (get_sign(~a) == positive)),
+        @acrule(Heaviside(~a::notavariable * ~x) => 1 - Heaviside(~x) where (get_sign(~a) == negative)),
+        @rule(Heaviside(~x)^~k::notavariable => Heaviside(~x) where (get_sign(~k)) == positive),
         #derivative rules
         @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
         @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
         #integration rules:
-        # *all need to be reworked using Intervals from IntervalSets.jl
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(~f*Heaviside(~var)) =>
-            0<=~domain[1] ? nothing :
-            0>=~domain[2] ? 0 :
-            Integral(~var::Symbolics.Num, (0, ~domain[2]))(~f)),
-        @rule(Integral(~var::Symbolics.Num, ~interval::DomainSets.Interval)(~f * Heaviside(~var - ~c::Real)) =>
-            ~c >= ~domain[2] ? 0 :
-            ~c <= ~domain[1] ? Integral(~var, ~domain)(~f) :
-            Integral(~var, (~c, ~domain[2]))(~f)),
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(Heaviside(~var)) =>
-            0<=~domain[1] ? 0 :
-            0>=~domain[2] ? nothing :
-            ~domain[2]),
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(Heaviside(~var - ~c::Real)) =>
-            ~c >= ~domain[2] ? 0 :
-            ~c <= ~domain[1] ? ~domain[2] - ~domain[1] :
-            ~domain[2] - ~c)
+        @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
+        @rule(Integral(~vars, ~domain::DomainSets.Domain)(Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(1))
     ]
 
     combined_rules = vcat(dirac_rules, heaviside_rules)
     return SymbolicUtils.Postwalk(SymbolicUtils.Chain(combined_rules))
 end
 
+#shorthand for creating Differentials
+function D(vars...)
+    # 1. Sort the provided variables alphabetically right away
+    sorted_vars = sort(collect(vars), by=string)
 
+    # 2. Return a custom operator that nests the Differentials from the inside out
+    return expr -> foldr((v, ex) -> Differential(v)(ex), sorted_vars, init=expr)
+end
 
 #generic helpers
 function compute_J_inv(var_exprs, new_vars)
@@ -176,8 +115,64 @@ function chain_rule(J_inv, old_var_idx, new_vars, arg, order=1)
     return unwrap(term)
 end
 
-#parameter helper - gives full list of parameters appearing in system of equations
-function extract_parameters(list::Tuple, nonparams::Vector{Symbolics.Num})
+function expr_to_domain(expr, vars)
+    vars_array = vars isa AbstractVector ? Symbolics.unwrap.(vars) : [Symbolics.unwrap(vars)]
+    # Similar to your transform_domains logic[cite: 1]
+    expr_unwrapped = Symbolics.unwrap(expr)
+    func_expr, _ = Symbolics.build_function(expr_unwrapped, vars_array, expression=Val{false})
+
+    # SuperlevelSet(f, c) creates the domain where f(x) >= c
+    return DomainSets.SuperlevelSet(x -> func_expr(collect(x)), 0.0)
+end
+
+
+function display_expr(expr)
+    # Unwrap to access the raw SymbolicUtils tree
+    expr_unwrapped = Symbolics.unwrap(expr)
+
+    # 1. Base Case: If it's just a variable (x) or a number (5), leave it alone
+    if !SymbolicUtils.istree(expr_unwrapped)
+        return expr
+    end
+
+    op = SymbolicUtils.operation(expr_unwrapped)
+    args = SymbolicUtils.arguments(expr_unwrapped)
+
+    # 2. The Magic: Intercepting the Differentials
+    if op isa Differential
+        vars = []
+        curr = expr_unwrapped
+
+        # Dig all the way down the nested rabbit hole and collect the variables
+        while SymbolicUtils.istree(curr) && SymbolicUtils.operation(curr) isa Differential
+            push!(vars, SymbolicUtils.operation(curr).x)
+            curr = SymbolicUtils.arguments(curr)[1]
+        end
+
+        # Join the variables into a single string (e.g., "x", "y" becomes "xy")
+        var_str = join(string.(vars), "")
+
+        # Create a temporary, fake function operator just for printing
+        # This creates a callable symbol like D_xy
+        display_op = SymbolicUtils.Sym{SymbolicUtils.FnType{Tuple,Real}}(Symbol("D_{$var_str}"))
+
+        # Process whatever is inside the derivative, then wrap it in our fake function
+        return wrap(display_op(Symbolics.unwrap(display_pde(curr))))
+    end
+
+    # 3. For Everything Else: (+, *, ^), rebuild the tree normally
+    processed_args = map(a -> Symbolics.unwrap(display_pde(a)), args)
+    return wrap(SymbolicUtils.similarterm(expr_unwrapped, op, processed_args))
+end
+
+display_pde(expr) = display_expr(expr)
+
+function display_pde(eq::Symbolics.Equation)
+    return display_expr(eq.lhs) ~ display_expr(eq.rhs)
+end
+
+#parameter helper
+function extract_parameters(list::Tuple)
     symbols = Symbolics.Num[]
     for i in list
         if i isa Symbolics.Equation
@@ -187,36 +182,33 @@ function extract_parameters(list::Tuple, nonparams::Vector{Symbolics.Num})
             vars = collect(Symbolics.get_variables(unwrap(i)))
             append!(symbols, vars)
         else
-            println(i)
             throw(ArgumentError("cannot extract parameters from $(typeof(i))"))
         end
     end
 
+    # Keep only unique variables found in the expressions
     unique_vars = unique(symbols)
-    known_vars = unwrap.(nonparams)
-    # Filter out known nonparams AND any expression that is a tree (like a Differential)
-    params = filter(unique_vars) do v
-        val = unwrap(v)
-        is_known = any(isequal(val, k) for k in known_vars)
 
-        !is_known && !SymbolicUtils.istree(val)
+    # Filter using ModelingToolkit's native parameter metadata check
+    params = filter(unique_vars) do v
+        ModelingToolkit.isparameter(unwrap(v))
     end
 
-    # Return as Vector{Symbolics.Num} to match your struct definition
+    # Return as Vector{Symbolics.Num} to maintain compatibility with your other functions
     return convert(Vector{Symbolics.Num}, wrap.(params))
 end
 
 #for just changing parameters
-function change_parameters(DiffEqInput::DiffEq, param_mapping::Dict)
+function change_parameters(sys::DiffEq, param_mapping::Dict)
     # Pass 1: Raw substitution without the special rewriter
-    substituted_eqs = [wrap(substitute(eq.lhs - eq.rhs, param_mapping)) for eq in DiffEqInput.eqs]
-    substituted_bcs_lhs = [wrap(substitute(bc.lhs, param_mapping)) for bc in DiffEqInput.bcs]
-    substituted_bcs_rhs = [wrap(substitute(bc.rhs, param_mapping)) for bc in DiffEqInput.bcs]
+    substituted_eqs = [wrap(substitute(eq.lhs - eq.rhs, param_mapping)) for eq in sys.eqs]
+    substituted_bcs_lhs = [wrap(substitute(bc.lhs, param_mapping)) for bc in sys.bcs]
+    substituted_bcs_rhs = [wrap(substitute(bc.rhs, param_mapping)) for bc in sys.bcs]
 
     # Pass 2: Extract NEW parameters directly from the expressions
     # Leveraging your ability to pass Symbolics.Num directly into the tuple
     exprs_tuple = Tuple(vcat(substituted_eqs, substituted_bcs_lhs, substituted_bcs_rhs))
-    new_params = extract_parameters(exprs_tuple, vcat(DiffEqInput.indeps, DiffEqInput.deps)) #[cite: 1]
+    new_params = extract_parameters(exprs_tuple, vcat(sys.ivs, sys.dvs)) #[cite: 1]
 
     # Pass 3: Initialize the rewriter with the updated parameter list and apply it
     dr = special_rewriter(new_params)
@@ -230,12 +222,12 @@ function change_parameters(DiffEqInput::DiffEq, param_mapping::Dict)
     for (slhs, srhs) in zip(substituted_bcs_lhs, substituted_bcs_rhs)
         push!(transformed_bcs, simplify(dr(slhs)) ~ simplify(dr(srhs)))
     end
-
-    return DiffEq(transformed_eqs, DiffEqInput.indeps, DiffEqInput.deps, new_params, transformed_bcs) #[cite: 1]
+    # *need to add a helper function for getting the new domains
+    return DiffEq(transformed_eqs, sys.ivs, sys.dvs, new_params, transformed_bcs, new_domains) #[cite: 1]
 end
 
-#helper for change_independents - recursively traverses expression trees
-function custom_rewrite(expr, var_map, J_inv, new_indeps, old_u, new_u, dep_funcs, cache=Dict())
+#helper for change_ivendents - recursively traverses expression trees
+function custom_rewrite(expr, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, cache=Dict())
     expr = unwrap(expr)
 
     if haskey(cache, expr)
@@ -252,9 +244,9 @@ function custom_rewrite(expr, var_map, J_inv, new_indeps, old_u, new_u, dep_func
     op = SymbolicUtils.operation(expr)
     args = SymbolicUtils.arguments(expr)
 
-    # Intercept dependent variables (e.g., changing u(x,y) to u(r,θ))
+    # Intercept dvendent variables (e.g., changing u(x,y) to u(r,θ))
     # Done top-down, skipping the arguments inside so they never become polar coordinates.
-    if any(isequal(op, d) for d in dep_funcs)
+    if any(isequal(op, d) for d in dv_funcs)
         res = unwrap(op(new_u...))
         cache[expr] = res
         return res
@@ -269,15 +261,15 @@ function custom_rewrite(expr, var_map, J_inv, new_indeps, old_u, new_u, dep_func
         idx = findfirst(isequal(unwrap(diff_var)), old_u)
         if idx !== nothing
             # Process the argument inside the differential first
-            rewritten_arg = custom_rewrite(args[1], var_map, J_inv, new_indeps, old_u, new_u, dep_funcs, cache)
+            rewritten_arg = custom_rewrite(args[1], var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, cache)
 
-            res = chain_rule(J_inv, idx, new_indeps, rewritten_arg, diff_order)
+            res = chain_rule(J_inv, idx, new_ivs, rewritten_arg, diff_order)
             cache[expr] = res
             return res
         end
     end
 
-    new_args = [custom_rewrite(a, var_map, J_inv, new_indeps, old_u, new_u, dep_funcs, cache) for a in args]
+    new_args = [custom_rewrite(a, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, cache) for a in args]
 
     if all(a === b for (a, b) in zip(args, new_args))
         cache[expr] = expr
@@ -288,8 +280,8 @@ function custom_rewrite(expr, var_map, J_inv, new_indeps, old_u, new_u, dep_func
     return res
 end
 
-#helper for change_independents - changes domain Dict 
-function transform_domains(old_domains::Vector{Pair}, indep_mapping::Dict, new_indeps::Vector{Symbolics.Num})
+#helper for change_ivendents - changes domain Dict 
+function transform_domains(old_domains::Vector{Pair}, iv_mapping::Dict, new_ivs::Vector{Symbolics.Num})
     new_domain_pairs = Pair[]
 
     for (old_vars, dom) in old_domains
@@ -297,10 +289,10 @@ function transform_domains(old_domains::Vector{Pair}, indep_mapping::Dict, new_i
         var_tuple = old_vars isa Tuple ? old_vars : (old_vars,)
 
         # Check if any variable in this specific domain block is being mapped
-        if any(haskey(indep_mapping, v) for v in var_tuple)
+        if any(haskey(iv_mapping, v) for v in var_tuple)
 
             # 1. Grab the substitution expressions (e.g., [r*cos(θ), r*sin(θ)])
-            exprs = [get(indep_mapping, v, v) for v in var_tuple]
+            exprs = [get(iv_mapping, v, v) for v in var_tuple]
 
             # 2. Find all unique new variables present in these expressions
             found_vars = Set{Symbolics.Num}()
@@ -308,8 +300,8 @@ function transform_domains(old_domains::Vector{Pair}, indep_mapping::Dict, new_i
                 union!(found_vars, Symbolics.get_variables(Symbolics.unwrap(expr)))
             end
 
-            # Preserve the strict ordering defined by the user in `new_indeps`
-            new_vars = Tuple(filter(v -> v in found_vars, new_indeps))
+            # Preserve the strict ordering defined by the user in `new_ivs`
+            new_vars = Tuple(filter(v -> v in found_vars, new_ivs))
 
             # 3. Compile a numeric function: F(new_vars) -> old_vars
             # We must unwrap to work directly with SymbolicUtils expressions
@@ -339,61 +331,60 @@ function transform_domains(old_domains::Vector{Pair}, indep_mapping::Dict, new_i
     return new_domain_pairs
 end
 
-# *needs to be updated to use transform_domains
-function change_independents(DiffEqInput::DiffEq, new_indeps, indep_mapping::Dict)
-    indep_exprs = Symbolics.Num[]
-    for old_indep in DiffEqInput.indeps
-        if haskey(indep_mapping, old_indep)
-            push!(indep_exprs, indep_mapping[old_indep])
+function change_ivs(sys::DiffEq, new_ivs, iv_mapping::Dict)
+    iv_exprs = Symbolics.Num[]
+    for old_iv in sys.ivs
+        if haskey(iv_mapping, old_iv)
+            push!(iv_exprs, iv_mapping[old_iv])
         else
             # Fallback: if the user omits a variable from the dictionary, keep it unchanged
-            push!(indep_exprs, old_indep)
+            push!(iv_exprs, old_iv)
         end
     end
 
-    replaced_old_indeps = collect(keys(indep_mapping))
+    replaced_old_ivs = collect(keys(iv_mapping))
     # Keep old variables that do not appear in the dictionary keys
-    kept_old_indeps = setdiff(DiffEqInput.indeps, replaced_old_indeps)
+    kept_old_ivs = setdiff(sys.ivs, replaced_old_ivs)
 
-    final_indeps = vcat(kept_old_indeps, new_indeps)
-    old_u = unwrap.(DiffEqInput.indeps)
-    new_u = unwrap.(new_indeps)
-    dep_funcs = [SymbolicUtils.operation(unwrap(dep)) for dep in DiffEqInput.deps]
-    params = extract_parameters(Tuple(vcat(DiffEqInput.eqs, DiffEqInput.bcs, indep_exprs)), vcat(final_indeps, DiffEqInput.deps, DiffEqInput.indeps))
+    final_ivs = vcat(kept_old_ivs, new_ivs)
+    old_u = unwrap.(sys.ivs)
+    new_u = unwrap.(new_ivs)
+    dv_funcs = [SymbolicUtils.operation(unwrap(dv)) for dv in sys.dvs]
+    params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, iv_exprs)))
 
-    J_inv = compute_J_inv(indep_exprs, new_indeps)
-    var_map = Dict(old_u .=> unwrap.(indep_exprs))
+    J_inv = compute_J_inv(iv_exprs, new_ivs)
+    var_map = Dict(old_u .=> unwrap.(iv_exprs))
     dr = special_rewriter(params)
 
     transformed_eqs = Symbolics.Equation[]
-    for eq in DiffEqInput.eqs
+    for eq in sys.eqs
         lhs_expr = eq.lhs - eq.rhs
         lhs_u = unwrap(lhs_expr)
-        rewritten_lhs = custom_rewrite(lhs_u, var_map, J_inv, new_indeps, old_u, new_u, dep_funcs)
+        rewritten_lhs = custom_rewrite(lhs_u, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)
         simplified_lhs = simplify(dr(expand_derivatives(wrap(rewritten_lhs))))
 
         push!(transformed_eqs, simplified_lhs ~ 0)
     end
     transformed_bcs = Symbolics.Equation[]
-    for bc in DiffEqInput.bcs
+    for bc in sys.bcs
         # Transform LHS and RHS separately to maintain equations like u(0, y) ~ 1
-        rewritten_lhs = custom_rewrite(unwrap(bc.lhs), var_map, J_inv, new_indeps, old_u, new_u, dep_funcs)
+        rewritten_lhs = custom_rewrite(unwrap(bc.lhs), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)
         simplified_lhs = simplify(dr(expand_derivatives(wrap(rewritten_lhs))))
 
-        rewritten_rhs = custom_rewrite(unwrap(bc.rhs), var_map, J_inv, new_indeps, old_u, new_u, dep_funcs)
+        rewritten_rhs = custom_rewrite(unwrap(bc.rhs), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)
         simplified_rhs = simplify(dr(expand_derivatives(wrap(rewritten_rhs))))
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
 
-    new_domains = transform_domains(DiffEqInput.domains, indep_mapping, new_indeps)
+    new_domains = transform_domains(sys.domains, iv_mapping, new_ivs)
 
-    new_deps = [Symbolics.wrap(SymbolicUtils.term(op, Symbolics.unwrap.(new_indeps)...)) for op in dep_funcs]
-    return DiffEq(transformed_eqs, final_indeps, new_deps, params, transformed_bcs, new_domains)
+    new_dvs = [Symbolics.wrap(SymbolicUtils.term(op, Symbolics.unwrap.(new_ivs)...)) for op in dv_funcs]
+    return DiffEq(transformed_eqs, final_ivs, new_dvs, params, transformed_bcs, new_domains)
 end
 
-#helper for change_dependents - recursively traverses expression trees
-function substitute_dependents(expr, old_dep_ops, dep_exprs, indeps, cache=Dict())
+#helper for change_dvendents - recursively traverses expression trees
+function substitute_dvs(expr, old_dv_ops, dv_exprs, ivs, cache=Dict())
     expr = unwrap(expr)
 
     if haskey(cache, expr)
@@ -409,23 +400,23 @@ function substitute_dependents(expr, old_dep_ops, dep_exprs, indeps, cache=Dict(
     op = SymbolicUtils.operation(expr)
     args = SymbolicUtils.arguments(expr)
 
-    # Check if the operation matches one of our old dependent variables (e.g., 'u' or 'v')
-    idx = findfirst(isequal(op), old_dep_ops)
+    # Check if the operation matches one of our old dvendent variables (e.g., 'u' or 'v')
+    idx = findfirst(isequal(op), old_dv_ops)
     if idx !== nothing
-        # Map the independent variables to whatever arguments are currently inside the function
+        # Map the ivendent variables to whatever arguments are currently inside the function
         # For u(0, t), this maps x => 0 and t => t
-        arg_sub = Dict(wrap.(indeps) .=> wrap.(args))
+        arg_sub = Dict(wrap.(ivs) .=> wrap.(args))
 
-        # Substitute these arguments into the corresponding new dependent expression
+        # Substitute these arguments into the corresponding new dvendent expression
         # For f(x, t) + g(x, t), this yields f(0, t) + g(0, t)
-        res = unwrap(substitute(wrap(dep_exprs[idx]), arg_sub))
+        res = unwrap(substitute(wrap(dv_exprs[idx]), arg_sub))
 
         cache[expr] = res
         return res
     end
 
     # Recursively apply to arguments (drilling into Differential operators)
-    new_args = [substitute_dependents(a, old_dep_ops, dep_exprs, indeps, cache) for a in args]
+    new_args = [substitute_dvendents(a, old_dv_ops, dv_exprs, ivs, cache) for a in args]
 
     # Reconstruct the tree if any arguments changed
     if all(a === b for (a, b) in zip(args, new_args))
@@ -438,81 +429,81 @@ function substitute_dependents(expr, old_dep_ops, dep_exprs, indeps, cache=Dict(
     return res
 end
 
-function change_dependents(DiffEqInput::DiffEq, new_deps::Vector{Symbolics.Num}, dep_mapping::Dict)
-    # 1. Align expressions with the existing dependency order
-    dep_exprs = Symbolics.Num[]
-    for old_dep in DiffEqInput.deps
-        if haskey(dep_mapping, old_dep)
-            push!(dep_exprs, dep_mapping[old_dep])
+function change_dvs(sys::DiffEq, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
+    # 1. Align expressions with the existing dvendency order
+    dv_exprs = Symbolics.Num[]
+    for old_dv in sys.dvs
+        if haskey(dv_mapping, old_dv)
+            push!(dv_exprs, dv_mapping[old_dv])
         else
-            push!(dep_exprs, old_dep)
+            push!(dv_exprs, old_dv)
         end
     end
 
-    replaced_old_deps = collect(keys(dep_mapping))
-    kept_old_deps = setdiff(DiffEqInput.deps, replaced_old_deps)
+    replaced_old_dvs = collect(keys(dv_mapping))
+    kept_old_dvs = setdiff(sys.dvs, replaced_old_dvs)
 
-    final_deps = vcat(kept_old_deps, new_deps)
+    final_dvs = vcat(kept_old_dvs, new_dvs)
 
-    indeps = unwrap.(DiffEqInput.indeps)
-    old_dep_ops = [SymbolicUtils.operation(unwrap(dep)) for dep in DiffEqInput.deps]
-    u_dep_exprs = unwrap.(dep_exprs)
-    params = extract_parameters(Tuple(vcat(DiffEqInput.eqs, DiffEqInput.bcs, dep_exprs)), vcat(DiffEqInput.indeps, final_deps))
+    ivs = unwrap.(sys.ivs)
+    old_dv_ops = [SymbolicUtils.operation(unwrap(dv)) for dv in sys.dvs]
+    u_dv_exprs = unwrap.(dv_exprs)
     dr = special_rewriter(params)
 
     transformed_eqs = Symbolics.Equation[]
-    for eq in DiffEqInput.eqs
+    for eq in sys.eqs
         # Move to LHS and unwrap
         lhs_expr = unwrap(eq.lhs - eq.rhs)
 
         # Traverse and forcefully substitute inside Differentials
-        substituted_lhs = substitute_dependents(lhs_expr, old_dep_ops, u_dep_exprs, indeps)
+        substituted_lhs = substitute_dvs(lhs_expr, old_dv_ops, u_dv_exprs, ivs)
         simplified_lhs = simplify(dr(expand_derivatives(wrap(substituted_lhs))))
 
         push!(transformed_eqs, simplified_lhs ~ 0)
     end
 
     transformed_bcs = Symbolics.Equation[]
-    for bc in DiffEqInput.bcs
-        substituted_lhs = substitute_dependents(unwrap(bc.lhs), old_dep_ops, u_dep_exprs, indeps)
+    for bc in sys.bcs
+        substituted_lhs = substitute_dvendents(unwrap(bc.lhs), old_dv_ops, u_dv_exprs, ivs)
         simplified_lhs = simplify(dr(expand_derivatives(wrap(substituted_lhs))))
 
-        substituted_rhs = substitute_dependents(unwrap(bc.rhs), old_dep_ops, u_dep_exprs, indeps)
+        substituted_rhs = substitute_dvendents(unwrap(bc.rhs), old_dv_ops, u_dv_exprs, ivs)
         simplified_rhs = simplify(dr(expand_derivatives(wrap(substituted_rhs))))
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
+    params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, dv_exprs)))
 
-    # Passing DiffEqInput.params assuming you want to retain the original params block manually
-    return DiffEq(transformed_eqs, DiffEqInput.indeps, new_deps, DiffEqInput.params, transformed_bcs)
+    # Passing sys.params assuming you want to retain the original params block manually
+    return PDESystem(transformed_eqs, sys.ivs, final_dvs, params, transformed_bcs)
 end
 
 # helpers for simplify_and_group
-function _is_target(e, deps::Vector{Symbolics.Num}, dep_ops)
-    # If it is a leaf node, check if it matches any dependent variable directly
+function _is_target(e, dvs::Vector{Symbolics.Num}, dv_ops)
+    # If it is a leaf node, check if it matches any dvendent variable directly
     if !SymbolicUtils.istree(e)
-        return any(isequal(e, unwrap(d)) for d in deps)
+        return ModelingToolkit.isvariable(e)
     end
 
     op = SymbolicUtils.operation(e)
 
-    # Check if the operation matches any of our base dependent operations
-    if any(isequal(op, d_op) for d_op in dep_ops)
+    # Check if the operation matches any of our base dvendent operations
+    if any(isequal(op, d_op) for d_op in dv_ops)
         return true
     end
 
     # Support mixed derivatives by recursively checking arguments
     if op isa Differential
         args = SymbolicUtils.arguments(e)
-        return _is_target(args[1], deps, dep_ops)
+        return _is_target(args[1], dvs, dv_ops)
     end
 
     return false
 end
 
-function _find_targets!(e, deps::Vector{Symbolics.Num}, dep_ops, targets::Set)
+function _find_targets!(e, dvs::Vector{Symbolics.Num}, dv_ops, targets::Set)
     # If we found a target, add it and stop recursing
-    if _is_target(e, deps, dep_ops)
+    if _is_target(e, dvs, dv_ops)
         push!(targets, e)
         return
     end
@@ -520,7 +511,7 @@ function _find_targets!(e, deps::Vector{Symbolics.Num}, dep_ops, targets::Set)
     # Otherwise, keep digging through the expression tree
     if SymbolicUtils.istree(e)
         for arg in SymbolicUtils.arguments(e)
-            _find_targets!(arg, deps, dep_ops, targets)
+            _find_targets!(arg, dvs, dv_ops, targets)
         end
     end
 end
@@ -530,26 +521,26 @@ function _diff_depth(e)
         return 0
     end
 
-    # Increment depth for each Differential operation
+    # Increment dvth for each Differential operation
     if SymbolicUtils.operation(e) isa Differential
-        return 1 + _diff_depth(SymbolicUtils.arguments(e)[1])
+        return 1 + _diff_dvth(SymbolicUtils.arguments(e)[1])
     end
 
     return 0
 end
 
 # main function
-function simplify_and_group(eq::Symbolics.Equation, deps::Vector{Symbolics.Num})
+function simplify_and_group(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
     expr = expand_derivatives(unwrap(eq.lhs - eq.rhs))
 
-    dep_ops = [SymbolicUtils.operation(unwrap(d)) for d in deps]
+    dv_ops = [SymbolicUtils.operation(unwrap(d)) for d in dvs]
     targets = Set()
 
     # Pass the required state into the mutator function
-    _find_targets!(expr, deps, dep_ops, targets)
+    _find_targets!(expr, dvs, dv_ops, targets)
 
     # Sort targets safely using the external helper
-    sorted_targets = sort(collect(targets), by=_diff_depth, rev=true)
+    sorted_targets = sort(collect(targets), by=_diff_dvth, rev=true)
 
     grouped_expr = 0
     remainder = expr
@@ -567,4 +558,5 @@ function simplify_and_group(eq::Symbolics.Equation, deps::Vector{Symbolics.Num})
 
     return grouped_expr ~ 0
 end
+
 println("my_functions.jl ran successfully")
