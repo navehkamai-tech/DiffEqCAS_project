@@ -92,6 +92,37 @@ end
 #Heaviside step function
 @register_symbolic Heaviside(x::Real)
 
+# metadata structs
+struct VariableUnit end
+struct ParameterSign end
+
+function build_variable(name::Symbol, unit)
+    v = Symbolics.unwrap(first(@variables $name))
+    return Symbolics.wrap(Symbolics.setmetadata(v, VariableUnit, unit))
+end
+
+function build_parameter(name::Symbol, unit, sign::Symbol=:both)
+    p = Symbolics.unwrap(first(@variables $name))
+    p = Symbolics.setmetadata(p, VariableUnit, unit)
+    p = Symbolics.setmetadata(p, ParameterSign, sign)
+    return Symbolics.wrap(p)
+end
+
+function get_unit(x)
+    Symbolics.getmetadata(Symbolics.unwrap(x), VariableUnit)
+end
+
+function get_sign(x)
+    unwrapped = Symbolics.unwrap(x)
+    if unwrapped isa Real
+        return unwrapped > 0 ? :positive : unwrapped < 0 ? :negative : :zero
+    end
+    if Symbolics.hasmetadata(unwrapped, ParameterSign)
+        return Symbolics.getmetadata(unwrapped, ParameterSign)
+    end
+    return :both
+end
+
 function special_rewriter(params=[])
     is_scalar(x) = any(isequal(x, p) for p in params) || x isa Number
 
@@ -120,11 +151,26 @@ function special_rewriter(params=[])
     ]
     heaviside_rules = [
         #algebraic rules
-        @rule(Heaviside(-(~x)) => 1-Heaviside(~x)),
-        @acrule(Heaviside(~a::Real * ~x) =>
-            ~a>0 ? Heaviside(~x) :
-            ~a<0 ? 1-Heaviside(~x) : 0.5),
-        @rule(Heaviside(~x)^~k::Number => ~k > 0 ? Heaviside(~x) : nothing),
+        @rule(Heaviside(-1 * ~x) => 1 - Symbolics.unwrap(Heaviside(Symbolics.wrap(~x)))),
+        @acrule(Heaviside(~a * ~x) => begin
+            sign_a = get_sign(Symbolics.wrap(~a))
+            if sign_a == :positive
+                Symbolics.unwrap(Heaviside(Symbolics.wrap(~x)))
+            elseif sign_a == :negative
+                1 - Symbolics.unwrap(Heaviside(Symbolics.wrap(~x)))
+            elseif sign_a == :zero
+                0.5
+            else
+                nothing
+            end
+        end),
+        @rule(Heaviside(~x)^~k => begin
+            if ~k isa Real && ~k > 0
+                Symbolics.unwrap(Heaviside(Symbolics.wrap(~x)))
+            else
+                nothing
+            end
+        end),
         #derivative rules
         @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
         @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
