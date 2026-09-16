@@ -14,7 +14,7 @@ struct DiffEq
     deps::Vector{Symbolics.Num}
     params::Vector{Symbolics.Num}
     bcs::Vector{Symbolics.Equation}
-    domain::DomainSets.Domain
+    domains::Vector{Pair{Any,DomainSets.Domain}}
 
     function DiffEq(
         eqs::Vector{Symbolics.Equation},
@@ -56,7 +56,7 @@ function build_system(eqs::Vector{Symbolics.Equation}, deps::Vector{Symbolics.Nu
 end
 
 function addtodiffeq(sys::DiffEq, field::Symbol, addition::Vector)
-    if field == :domain || field == :domains
+    if field == :domains
         throw(ArgumentError("Domain additions are ambiguous. Use `change_domain` instead."))
     end
 
@@ -84,8 +84,8 @@ end
 
 #defining special functions
 #Dirac Delta function
-@register_symbolic Dirac(x::Symbolics.Num, n::Int)
-@register_symbolic Dirac(x::Symbolics.Num)
+@register_symbolic Dirac(x, n)
+@register_symbolic Dirac(x)
 
 #Heaviside step function
 @register_symbolic Heaviside(x::Real)
@@ -100,13 +100,12 @@ function special_rewriter(params=[])
         @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Dirac(~x, ~n)),
         @acrule(Dirac(~a::is_scalar * ~x, ~n) => Dirac(~x, ~n) / (abs(~a) * (~a)^(~n))),
         @acrule(Dirac(~a::is_scalar*(~x - ~c::Number), ~n) => Dirac(~x - ~c, ~n)/(abs(~a)*(~a)^(~n))),
-        @rule(~x*Dirac(~x, 0) => 0),
+        @rule(~x*Dirac(~x, 0) => 0.0),
         @rule(~x * Dirac(~x, ~n) => -(~n)*Dirac(~x, ~n-1)),
         #sifting rules
         # *needs to be generalized for Dirac functions of more than one variable later on
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Domain)(~f*Dirac(~var - ~c, ~n)) => ~c ∈ ~domain ? substitute((-1)^(~n)*expand_derivatives(Differential(~var, ~n)((~f))), Dict(~var => ~c)) : 0),
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Domain)(Dirac(~var - ~c, ~n)) => (~c ∈ ~domain)&&((~n)==0) ? 1 : 0),
-        #derivative rule
+        @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Dirac(~vars - ~c, ~n)) => ~c ∈ ~domain ? substitute((-1)^(~n)*expand_derivatives(Differential(~vars, ~n)((~f))), Dict(~vars => ~c)) : 0),
+        @rule(Integral(~vars, ~domain::DomainSets.Domain)(Dirac(~vars - ~c, ~n)) => (~c ∈ ~domain)&&((~n)==0) ? 1 : 0),
         @rule(Differential(~var, ~k)(Dirac(~var, ~n)) => Dirac(~var, ~n+~k))
     ]
     heaviside_rules = [
@@ -120,23 +119,23 @@ function special_rewriter(params=[])
         @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
         @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
         #integration rules:
-        # *all need to be reworked using Intervals from IntervalSets.jl
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(~f*Heaviside(~var)) =>
-            0<=~domain[1] ? nothing :
-            0>=~domain[2] ? 0 :
-            Integral(~var::Symbolics.Num, (0, ~domain[2]))(~f)),
-        @rule(Integral(~var::Symbolics.Num, ~interval::DomainSets.Interval)(~f * Heaviside(~var - ~c::Real)) =>
-            ~c >= ~domain[2] ? 0 :
-            ~c <= ~domain[1] ? Integral(~var, ~domain)(~f) :
-            Integral(~var, (~c, ~domain[2]))(~f)),
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(Heaviside(~var)) =>
-            0<=~domain[1] ? 0 :
-            0>=~domain[2] ? nothing :
-            ~domain[2]),
-        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(Heaviside(~var - ~c::Real)) =>
-            ~c >= ~domain[2] ? 0 :
-            ~c <= ~domain[1] ? ~domain[2] - ~domain[1] :
-            ~domain[2] - ~c)
+        # reworked using DomainSets.Interval (which encompasses IntervalSets intervals)
+        @rule(Integral(~vars, ~domain::DomainSets.Interval)(~f*Heaviside(~vars)) =>
+            0<=DomainSets.leftendpoint(~domain) ? nothing :
+            0>=DomainSets.rightendpoint(~domain) ? 0 :
+            Integral(~vars, DomainSets.Interval(0, DomainSets.rightendpoint(~domain)))(~f)),
+        @rule(Integral(~vars, ~domain::DomainSets.Interval)(~f * Heaviside(~vars - ~c::Real)) =>
+            ~c >= DomainSets.rightendpoint(~domain) ? 0 :
+            ~c <= DomainSets.leftendpoint(~domain) ? Integral(~vars, ~domain)(~f) :
+            Integral(~vars, DomainSets.Interval(~c, DomainSets.rightendpoint(~domain)))(~f)),
+        @rule(Integral(~vars, ~domain::DomainSets.Interval)(Heaviside(~vars)) =>
+            0<=DomainSets.leftendpoint(~domain) ? 0 :
+            0>=DomainSets.rightendpoint(~domain) ? nothing :
+            DomainSets.rightendpoint(~domain)),
+        @rule(Integral(~vars, ~domain::DomainSets.Interval)(Heaviside(~vars - ~c::Real)) =>
+            ~c >= DomainSets.rightendpoint(~domain) ? 0 :
+            ~c <= DomainSets.leftendpoint(~domain) ? DomainSets.rightendpoint(~domain) - DomainSets.leftendpoint(~domain) :
+            DomainSets.rightendpoint(~domain) - ~c)
     ]
 
     combined_rules = vcat(dirac_rules, heaviside_rules)
@@ -280,8 +279,8 @@ function custom_rewrite(expr, var_map, J_inv, new_indeps, old_u, new_u, dep_func
 end
 
 #helper for change_independents - changes domain Dict 
-function transform_domains(old_domains::Vector{Pair}, indep_mapping::Dict, new_indeps::Vector{Symbolics.Num})
-    new_domain_pairs = Pair[]
+function transform_domains(old_domains::Vector{<:Pair}, indep_mapping::Dict, new_indeps::Vector{Symbolics.Num})
+    new_domain_pairs = Pair{Any,DomainSets.Domain}[]
 
     for (old_vars, dom) in old_domains
         # Normalize the key to a tuple for uniform processing
@@ -334,8 +333,8 @@ end
 function change_independents(DiffEqInput::DiffEq, new_indeps, indep_mapping::Dict)
     indep_exprs = Symbolics.Num[]
     for old_indep in DiffEqInput.indeps
-        if haskey(indep_mapping, old_indep)
-            push!(indep_exprs, indep_mapping[old_indep])
+        if haskey(indep_mapping, Symbolics.unwrap(old_indep)) || haskey(indep_mapping, old_indep)
+            push!(indep_exprs, get(indep_mapping, old_indep, get(indep_mapping, Symbolics.unwrap(old_indep), old_indep)))
         else
             # Fallback: if the user omits a variable from the dictionary, keep it unchanged
             push!(indep_exprs, old_indep)
@@ -378,7 +377,8 @@ function change_independents(DiffEqInput::DiffEq, new_indeps, indep_mapping::Dic
     end
 
     new_deps = [Symbolics.wrap(SymbolicUtils.term(op, Symbolics.unwrap.(new_indeps)...)) for op in dep_funcs]
-    return DiffEq(transformed_eqs, final_indeps, new_deps, params, transformed_bcs)
+    new_domains = transform_domains(DiffEqInput.domains, indep_mapping, new_indeps)
+    return DiffEq(transformed_eqs, final_indeps, new_deps, params, transformed_bcs, new_domains)
 end
 
 #helper for change_dependents - recursively traverses expression trees
