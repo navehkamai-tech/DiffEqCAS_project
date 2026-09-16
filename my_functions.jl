@@ -100,12 +100,13 @@ function special_rewriter(params=[])
         @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Dirac(~x, ~n)),
         @acrule(Dirac(~a::is_scalar * ~x, ~n) => Dirac(~x, ~n) / (abs(~a) * (~a)^(~n))),
         @acrule(Dirac(~a::is_scalar*(~x - ~c::Number), ~n) => Dirac(~x - ~c, ~n)/(abs(~a)*(~a)^(~n))),
-        @rule(~x*Dirac(~x, 0) => 0.0),
+        @rule(~x*Dirac(~x, 0) => 0),
         @rule(~x * Dirac(~x, ~n) => -(~n)*Dirac(~x, ~n-1)),
         #sifting rules
         # *needs to be generalized for Dirac functions of more than one variable later on
-        @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Dirac(~vars - ~c, ~n)) => ~c ∈ ~domain ? substitute((-1)^(~n)*expand_derivatives(Differential(~vars, ~n)((~f))), Dict(~vars => ~c)) : 0),
-        @rule(Integral(~vars, ~domain::DomainSets.Domain)(Dirac(~vars - ~c, ~n)) => (~c ∈ ~domain)&&((~n)==0) ? 1 : 0),
+        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Domain)(~f*Dirac(~var - ~c, ~n)) => ~c ∈ ~domain ? substitute((-1)^(~n)*expand_derivatives(Differential(~var, ~n)((~f))), Dict(~var => ~c)) : 0),
+        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Domain)(Dirac(~var - ~c, ~n)) => (~c ∈ ~domain)&&((~n)==0) ? 1 : 0),
+        #derivative rule
         @rule(Differential(~var, ~k)(Dirac(~var, ~n)) => Dirac(~var, ~n+~k))
     ]
     heaviside_rules = [
@@ -119,23 +120,23 @@ function special_rewriter(params=[])
         @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
         @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
         #integration rules:
-        # reworked using DomainSets.Interval (which encompasses IntervalSets intervals)
-        @rule(Integral(~vars, ~domain::DomainSets.Interval)(~f*Heaviside(~vars)) =>
-            0<=DomainSets.leftendpoint(~domain) ? nothing :
-            0>=DomainSets.rightendpoint(~domain) ? 0 :
-            Integral(~vars, DomainSets.Interval(0, DomainSets.rightendpoint(~domain)))(~f)),
-        @rule(Integral(~vars, ~domain::DomainSets.Interval)(~f * Heaviside(~vars - ~c::Real)) =>
-            ~c >= DomainSets.rightendpoint(~domain) ? 0 :
-            ~c <= DomainSets.leftendpoint(~domain) ? Integral(~vars, ~domain)(~f) :
-            Integral(~vars, DomainSets.Interval(~c, DomainSets.rightendpoint(~domain)))(~f)),
-        @rule(Integral(~vars, ~domain::DomainSets.Interval)(Heaviside(~vars)) =>
-            0<=DomainSets.leftendpoint(~domain) ? 0 :
-            0>=DomainSets.rightendpoint(~domain) ? nothing :
-            DomainSets.rightendpoint(~domain)),
-        @rule(Integral(~vars, ~domain::DomainSets.Interval)(Heaviside(~vars - ~c::Real)) =>
-            ~c >= DomainSets.rightendpoint(~domain) ? 0 :
-            ~c <= DomainSets.leftendpoint(~domain) ? DomainSets.rightendpoint(~domain) - DomainSets.leftendpoint(~domain) :
-            DomainSets.rightendpoint(~domain) - ~c)
+        # *all need to be reworked using Intervals from IntervalSets.jl
+        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(~f*Heaviside(~var)) =>
+            0<=~domain[1] ? nothing :
+            0>=~domain[2] ? 0 :
+            Integral(~var::Symbolics.Num, (0, ~domain[2]))(~f)),
+        @rule(Integral(~var::Symbolics.Num, ~interval::DomainSets.Interval)(~f * Heaviside(~var - ~c::Real)) =>
+            ~c >= ~domain[2] ? 0 :
+            ~c <= ~domain[1] ? Integral(~var, ~domain)(~f) :
+            Integral(~var, (~c, ~domain[2]))(~f)),
+        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(Heaviside(~var)) =>
+            0<=~domain[1] ? 0 :
+            0>=~domain[2] ? nothing :
+            ~domain[2]),
+        @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Interval)(Heaviside(~var - ~c::Real)) =>
+            ~c >= ~domain[2] ? 0 :
+            ~c <= ~domain[1] ? ~domain[2] - ~domain[1] :
+            ~domain[2] - ~c)
     ]
 
     combined_rules = vcat(dirac_rules, heaviside_rules)
