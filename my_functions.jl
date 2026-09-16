@@ -71,7 +71,7 @@ function special_rewriter()
         @rule(Heaviside(-(~x)) => 1-Heaviside(~x)),
         @acrule(Heaviside(~a::notavariable * ~x) => Heaviside(~x) where (get_sign(~a) == positive)),
         @acrule(Heaviside(~a::notavariable * ~x) => 1 - Heaviside(~x) where (get_sign(~a) == negative)),
-        @rule(Heaviside(~x)^~k::notavariable => Heaviside(~x) where (get_sign(~k)) == positive),
+        @rule(Heaviside(~x)^~k::notavariable => Heaviside(~x) where (get_sign(~k) == positive)),
         #derivative rules
         @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
         @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
@@ -172,7 +172,7 @@ function display_pde(eq::Symbolics.Equation)
 end
 
 #parameter helper
-function extract_parameters(list::Tuple)
+function extract_parameters(list::Tuple, nonparams::AbstractVector = Symbolics.Num[])
     symbols = Symbolics.Num[]
     for i in list
         if i isa Symbolics.Equation
@@ -186,12 +186,15 @@ function extract_parameters(list::Tuple)
         end
     end
 
-    # Keep only unique variables found in the expressions
     unique_vars = unique(symbols)
+    known_vars = Set(unwrap.(nonparams))
 
-    # Filter using ModelingToolkit's native parameter metadata check
+    # Filter out known nonparams AND any expression that is a tree (like a Differential)
     params = filter(unique_vars) do v
-        ModelingToolkit.isparameter(unwrap(v))
+        val = unwrap(v)
+        is_known = val in known_vars
+
+        !is_known && !SymbolicUtils.istree(val)
     end
 
     # Return as Vector{Symbolics.Num} to maintain compatibility with your other functions
