@@ -86,6 +86,8 @@ end
 #Dirac Delta function
 @register_symbolic Dirac(x::Symbolics.Num, n::Int)
 @register_symbolic Dirac(x::Symbolics.Num)
+@register_symbolic Dirac(x::AbstractVector, n::AbstractVector)
+@register_symbolic Dirac(x::AbstractVector)
 
 #Heaviside step function
 @register_symbolic Heaviside(x::Real)
@@ -93,15 +95,22 @@ end
 function special_rewriter(params=[])
     is_scalar(x) = any(isequal(x, p) for p in params) || x isa Number
 
+    function is_array_literal(x)
+        return SymbolicUtils.istree(x) && SymbolicUtils.operation(x) === SymbolicUtils.array_literal
+    end
+
     dirac_rules = [
+        #multivariate rules
+        @rule(Dirac(~x) => is_array_literal(~x) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el), 0)) for el in SymbolicUtils.arguments(~x)[2:end]]) : nothing),
+        @rule(Dirac(~x, ~n) => (is_array_literal(~x) && ~n isa AbstractArray) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el_x), el_n)) for (el_x, el_n) in zip(SymbolicUtils.arguments(~x)[2:end], ~n)]) : nothing),
         #rule for easier definition
-        @rule(Dirac(~x) => Dirac(~x, 0)),
+        @rule(Dirac(~x) => !is_array_literal(~x) ? Symbolics.unwrap(Dirac(Symbolics.wrap(~x), 0)) : nothing),
         #algebraic rules
-        @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Dirac(~x, ~n)),
-        @acrule(Dirac(~a::is_scalar * ~x, ~n) => Dirac(~x, ~n) / (abs(~a) * (~a)^(~n))),
-        @acrule(Dirac(~a::is_scalar*(~x - ~c::Number), ~n) => Dirac(~x - ~c, ~n)/(abs(~a)*(~a)^(~n))),
-        @rule(~x*Dirac(~x, 0) => 0),
-        @rule(~x * Dirac(~x, ~n) => -(~n)*Dirac(~x, ~n-1)),
+        @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Symbolics.unwrap(Dirac(Symbolics.wrap(~x), ~n))),
+        @acrule(Dirac(~a::is_scalar * ~x, ~n) => Symbolics.unwrap(Dirac(Symbolics.wrap(~x), ~n)) / (abs(~a) * (~a)^(~n))),
+        @acrule(Dirac(~a::is_scalar*(~x - ~c::Number), ~n) => Symbolics.unwrap(Dirac(Symbolics.wrap(~x - ~c), ~n))/(abs(~a)*(~a)^(~n))),
+        @acrule(~x*Dirac(~x, 0) => 0),
+        @acrule(~x * Dirac(~x, ~n) => -(~n)*Symbolics.unwrap(Dirac(Symbolics.wrap(~x), ~n-1))),
         #sifting rules
         # *needs to be generalized for Dirac functions of more than one variable later on
         @rule(Integral(~var::Symbolics.Num, ~domain::DomainSets.Domain)(~f*Dirac(~var - ~c, ~n)) => ~c ∈ ~domain ? substitute((-1)^(~n)*expand_derivatives(Differential(~var, ~n)((~f))), Dict(~var => ~c)) : 0),
