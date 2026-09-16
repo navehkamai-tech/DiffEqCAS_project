@@ -14,7 +14,7 @@ struct DiffEq
     deps::Vector{Symbolics.Num}
     params::Vector{Symbolics.Num}
     bcs::Vector{Symbolics.Equation}
-    domain::DomainSets.Domain
+    domains::Pair{Any,DomainSets.Domain}
 
     function DiffEq(
         eqs::Vector{Symbolics.Equation},
@@ -377,8 +377,10 @@ function change_independents(DiffEqInput::DiffEq, new_indeps, indep_mapping::Dic
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
 
+    new_domains = transform_domains(DiffEqInput.domains, indep_mapping, new_indeps)
+
     new_deps = [Symbolics.wrap(SymbolicUtils.term(op, Symbolics.unwrap.(new_indeps)...)) for op in dep_funcs]
-    return DiffEq(transformed_eqs, final_indeps, new_deps, params, transformed_bcs)
+    return DiffEq(transformed_eqs, final_indeps, new_deps, params, transformed_bcs, new_domains)
 end
 
 #helper for change_dependents - recursively traverses expression trees
