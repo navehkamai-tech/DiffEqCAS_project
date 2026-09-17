@@ -34,55 +34,48 @@ SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
 
 #Heaviside step function
 @register_symbolic Heaviside(x::Union{AbstractVector,Symbolics.Num})
+# 1. Define the helper functions as standard or anonymous functions
+notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
 
-function special_rewriter()
-    notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
-
-    function is_array_literal(x)
-        return SymbolicUtils.istree(x) && SymbolicUtils.operation(x) === SymbolicUtils.array_literal
-    end
-
-    diff_op_rules = [
-        @rule(Differential(~y)(Differential(~x)(~f)) =>
-            string(~x) < string(~y) ? Differential(~x)(Differential(~y)(~f)) : nothing)
-    ]
-    dirac_rules = [
-        #multivariate rules
-        @rule(Dirac(~x) => is_array_literal(~x) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el), 0)) for el in SymbolicUtils.arguments(~x)[2:end]]) : nothing),
-        @rule(Dirac(~x, ~n) => (is_array_literal(~x) && ~n isa AbstractArray) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el_x), el_n)) for (el_x, el_n) in zip(SymbolicUtils.arguments(~x)[2:end], ~n)]) : nothing),
-        #rule for easier definition
-        @rule(Dirac(~x) => Dirac(~x, 0)),
-        #algebraic rules
-        @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Dirac(~x, ~n)),
-        @acrule(Dirac(~a::notavariable * ~x, ~n) => Dirac(~x, ~n) / (abs(~a) * (~a)^(~n))),
-        @acrule(Dirac(~a::notavariable*(~x - ~c::Number), ~n) => Dirac(~x - ~c, ~n)/(abs(~a)*(~a)^(~n))),
-        @rule(~x*Dirac(~x, 0) => 0),
-        @rule(~x * Dirac(~x, ~n) => -(~n)*Dirac(~x, ~n-1)),
-        #sifting rules
-        @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f * Dirac(~vars - ~c)) =>
-            ~c ∈ ~domain ? substitute(~f, Dict(Symbolics.unwrap.(~vars) .=> Symbolics.unwrap.(~c))) : 0),
-        @rule(Integral(~vars, ~domain::DomainSets.Domain)(Dirac(~vars - ~c)) =>
-            ~c ∈ ~domain ? 1 : 0),
-        #derivative rule
-        @rule(Differential(~var, ~k)(Dirac(~var, ~n)) => Dirac(~var, ~n+~k))
-    ]
-    heaviside_rules = [
-        #algebraic rules
-        @rule(Heaviside(-(~x)) => 1-Heaviside(~x)),
-        @acrule(Heaviside(~a::notavariable * ~x) => Heaviside(~x) where (get_sign(~a) == positive)),
-        @acrule(Heaviside(~a::notavariable * ~x) => 1 - Heaviside(~x) where (get_sign(~a) == negative)),
-        @rule(Heaviside(~x)^~k::notavariable => Heaviside(~x) where (get_sign(~k)) == positive),
-        #derivative rules
-        @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
-        @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
-        #integration rules:
-        @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
-        @rule(Integral(~vars, ~domain::DomainSets.Domain)(Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(1))
-    ]
-
-    combined_rules = vcat(dirac_rules, heaviside_rules)
-    return SymbolicUtils.Postwalk(SymbolicUtils.Chain(combined_rules))
+function is_array_literal(x)
+    return SymbolicUtils.istree(x) && SymbolicUtils.operation(x) === SymbolicUtils.array_literal
 end
+
+# 2. Define the rule arrays as constants
+const diff_op_rules = [
+    @rule(Differential(~y)(Differential(~x)(~f)) =>
+        string(~x) < string(~y) ? Differential(~x)(Differential(~y)(~f)) : nothing)
+]
+
+const dirac_rules = [
+    @rule(Dirac(~x) => is_array_literal(~x) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el), 0)) for el in SymbolicUtils.arguments(~x)[2:end]]) : nothing),
+    @rule(Dirac(~x, ~n) => (is_array_literal(~x) && ~n isa AbstractArray) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el_x), el_n)) for (el_x, el_n) in zip(SymbolicUtils.arguments(~x)[2:end], ~n)]) : nothing),
+    @rule(Dirac(~x) => Dirac(~x, 0)),
+    @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Dirac(~x, ~n)),
+    @acrule(Dirac(~a::notavariable * ~x, ~n) => Dirac(~x, ~n) / (abs(~a) * (~a)^(~n))),
+    @acrule(Dirac(~a::notavariable*(~x - ~c::Number), ~n) => Dirac(~x - ~c, ~n)/(abs(~a)*(~a)^(~n))),
+    @rule(~x*Dirac(~x, 0) => 0),
+    @rule(~x * Dirac(~x, ~n) => -(~n)*Dirac(~x, ~n-1)),
+    @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f * Dirac(~vars - ~c)) =>
+        ~c ∈ ~domain ? substitute(~f, Dict(Symbolics.unwrap.(~vars) .=> Symbolics.unwrap.(~c))) : 0),
+    @rule(Integral(~vars, ~domain::DomainSets.Domain)(Dirac(~vars - ~c)) =>
+        ~c ∈ ~domain ? 1 : 0),
+    @rule(Differential(~var, ~k)(Dirac(~var, ~n)) => Dirac(~var, ~n+~k))
+]
+
+const heaviside_rules = [
+    @rule(Heaviside(-(~x)) => 1-Heaviside(~x)),
+    @acrule(Heaviside(~a::notavariable * ~x) => Heaviside(~x) where (get_sign(~a) == positive)),
+    @acrule(Heaviside(~a::notavariable * ~x) => 1 - Heaviside(~x) where (get_sign(~a) == negative)),
+    @rule(Heaviside(~x)^~k::notavariable => Heaviside(~x) where (get_sign(~k)) == positive),
+    @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
+    @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
+    @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
+    @rule(Integral(~vars, ~domain::DomainSets.Domain)(Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(1))
+]
+
+# 3. Create the single, compiled rewriter constant
+const SPECIAL_REWRITER = SymbolicUtils.Postwalk(SymbolicUtils.Chain(vcat(diff_op_rules, dirac_rules, heaviside_rules)))
 
 #shorthand for creating Differentials
 function D(vars...)
@@ -210,17 +203,14 @@ function change_parameters(sys::DiffEq, param_mapping::Dict)
     exprs_tuple = Tuple(vcat(substituted_eqs, substituted_bcs_lhs, substituted_bcs_rhs))
     new_params = extract_parameters(exprs_tuple, vcat(sys.ivs, sys.dvs)) #[cite: 1]
 
-    # Pass 3: Initialize the rewriter with the updated parameter list and apply it
-    dr = special_rewriter(new_params)
-
     transformed_eqs = Symbolics.Equation[]
     for seq in substituted_eqs
-        push!(transformed_eqs, simplify(dr(seq)) ~ 0)
+        push!(transformed_eqs, simplify(SPECIAL_REWRITER(seq)) ~ 0)
     end
 
     transformed_bcs = Symbolics.Equation[]
     for (slhs, srhs) in zip(substituted_bcs_lhs, substituted_bcs_rhs)
-        push!(transformed_bcs, simplify(dr(slhs)) ~ simplify(dr(srhs)))
+        push!(transformed_bcs, simplify(SPECIAL_REWRITER(slhs)) ~ simplify(SPECIAL_REWRITER(srhs)))
     end
     # *need to add a helper function for getting the new domains
     return DiffEq(transformed_eqs, sys.ivs, sys.dvs, new_params, transformed_bcs, new_domains) #[cite: 1]
@@ -354,14 +344,13 @@ function change_ivs(sys::DiffEq, new_ivs, iv_mapping::Dict)
 
     J_inv = compute_J_inv(iv_exprs, new_ivs)
     var_map = Dict(old_u .=> unwrap.(iv_exprs))
-    dr = special_rewriter(params)
 
     transformed_eqs = Symbolics.Equation[]
     for eq in sys.eqs
         lhs_expr = eq.lhs - eq.rhs
         lhs_u = unwrap(lhs_expr)
         rewritten_lhs = custom_rewrite(lhs_u, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)
-        simplified_lhs = simplify(dr(expand_derivatives(wrap(rewritten_lhs))))
+        simplified_lhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(rewritten_lhs))))
 
         push!(transformed_eqs, simplified_lhs ~ 0)
     end
@@ -369,10 +358,10 @@ function change_ivs(sys::DiffEq, new_ivs, iv_mapping::Dict)
     for bc in sys.bcs
         # Transform LHS and RHS separately to maintain equations like u(0, y) ~ 1
         rewritten_lhs = custom_rewrite(unwrap(bc.lhs), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)
-        simplified_lhs = simplify(dr(expand_derivatives(wrap(rewritten_lhs))))
+        simplified_lhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(rewritten_lhs))))
 
         rewritten_rhs = custom_rewrite(unwrap(bc.rhs), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)
-        simplified_rhs = simplify(dr(expand_derivatives(wrap(rewritten_rhs))))
+        simplified_rhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(rewritten_rhs))))
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
@@ -448,7 +437,6 @@ function change_dvs(sys::DiffEq, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
     ivs = unwrap.(sys.ivs)
     old_dv_ops = [SymbolicUtils.operation(unwrap(dv)) for dv in sys.dvs]
     u_dv_exprs = unwrap.(dv_exprs)
-    dr = special_rewriter(params)
 
     transformed_eqs = Symbolics.Equation[]
     for eq in sys.eqs
@@ -457,7 +445,7 @@ function change_dvs(sys::DiffEq, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
 
         # Traverse and forcefully substitute inside Differentials
         substituted_lhs = substitute_dvs(lhs_expr, old_dv_ops, u_dv_exprs, ivs)
-        simplified_lhs = simplify(dr(expand_derivatives(wrap(substituted_lhs))))
+        simplified_lhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(substituted_lhs))))
 
         push!(transformed_eqs, simplified_lhs ~ 0)
     end
@@ -465,10 +453,10 @@ function change_dvs(sys::DiffEq, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
     transformed_bcs = Symbolics.Equation[]
     for bc in sys.bcs
         substituted_lhs = substitute_dvendents(unwrap(bc.lhs), old_dv_ops, u_dv_exprs, ivs)
-        simplified_lhs = simplify(dr(expand_derivatives(wrap(substituted_lhs))))
+        simplified_lhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(substituted_lhs))))
 
         substituted_rhs = substitute_dvendents(unwrap(bc.rhs), old_dv_ops, u_dv_exprs, ivs)
-        simplified_rhs = simplify(dr(expand_derivatives(wrap(substituted_rhs))))
+        simplified_rhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(substituted_rhs))))
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
