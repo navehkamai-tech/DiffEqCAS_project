@@ -467,10 +467,10 @@ function change_dvs(sys::DiffEq, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
 end
 
 # helpers for simplify_and_group
-function _is_target(e, dvs::Vector{Symbolics.Num}, dv_ops)
+function _is_target(e, unwrapped_dvs::Set, dv_ops)
     # If it is a leaf node, check if it matches any dvendent variable directly
     if !SymbolicUtils.istree(e)
-        return ModelingToolkit.isvariable(e)
+        return e in unwrapped_dvs
     end
 
     op = SymbolicUtils.operation(e)
@@ -483,15 +483,15 @@ function _is_target(e, dvs::Vector{Symbolics.Num}, dv_ops)
     # Support mixed derivatives by recursively checking arguments
     if op isa Differential
         args = SymbolicUtils.arguments(e)
-        return _is_target(args[1], dvs, dv_ops)
+        return _is_target(args[1], unwrapped_dvs, dv_ops)
     end
 
     return false
 end
 
-function _find_targets!(e, dvs::Vector{Symbolics.Num}, dv_ops, targets::Set)
+function _find_targets!(e, unwrapped_dvs::Set, dv_ops, targets::Set)
     # If we found a target, add it and stop recursing
-    if _is_target(e, dvs, dv_ops)
+    if _is_target(e, unwrapped_dvs, dv_ops)
         push!(targets, e)
         return
     end
@@ -499,7 +499,7 @@ function _find_targets!(e, dvs::Vector{Symbolics.Num}, dv_ops, targets::Set)
     # Otherwise, keep digging through the expression tree
     if SymbolicUtils.istree(e)
         for arg in SymbolicUtils.arguments(e)
-            _find_targets!(arg, dvs, dv_ops, targets)
+            _find_targets!(arg, unwrapped_dvs, dv_ops, targets)
         end
     end
 end
@@ -521,11 +521,12 @@ end
 function simplify_and_group(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
     expr = expand_derivatives(unwrap(eq.lhs - eq.rhs))
 
+    unwrapped_dvs = Set([unwrap(d) for d in dvs])
     dv_ops = [SymbolicUtils.operation(unwrap(d)) for d in dvs]
     targets = Set()
 
     # Pass the required state into the mutator function
-    _find_targets!(expr, dvs, dv_ops, targets)
+    _find_targets!(expr, unwrapped_dvs, dv_ops, targets)
 
     # Sort targets safely using the external helper
     sorted_targets = sort(collect(targets), by=_diff_dvth, rev=true)
