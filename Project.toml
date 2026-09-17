@@ -1,6 +1,5 @@
 [deps]
 AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
-BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 Debugger = "31a5f54b-26ea-5ae9-a837-f05ce5417438"
 DomainSets = "5b8099bc-c8ec-5219-889f-1d9e522a28bf"
 Integrals = "de52edbc-65ea-441a-8357-d3a637375a31"
