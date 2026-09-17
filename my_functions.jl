@@ -561,4 +561,33 @@ function simplify_and_group(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
     return grouped_expr ~ 0
 end
 
+#helpers for nondimensionalize_pde
+function has_full_dimensions(sys::PDESystem)
+    symbols = vcat(sys.ivs, sys, dvs, sys.ps)
+    return !any(getunit(v)===nothing for v in symbols)
+end
+
+function has_valid_units(eq::Symbolics.Equation)
+    return eq.rhs==0||ModelingToolkit.get_unit(eq.lhs)==ModelingToolkit.get_unit(eq.rhs)
+end
+
+function find_dimension_matrix(symlist::Vector{Symbolics.Num})
+    B=[]
+    for sym in symlist
+
+    end
+end
+
+function nondimensionalize_pde(sys::PDESystem)
+    if !has_full_dimensions(sys)
+        throw(IOError("all symbols must have units for nondimensionalization"))
+    end
+    for eq in vcat(sys.eqs, sys.bcs)
+        if !has_valid_units(eq)
+            throw(IOError("$(eq) has different units on each side"))
+        end
+    end
+
+end
+
 println("my_functions.jl ran successfully")

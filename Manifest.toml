@@ -2,7 +2,7 @@
 
 julia_version = "1.13.0"
 manifest_format = "2.1"
-project_hash = "7d8aa50305c69fba85440051a29afe7661e0c5e3"
+project_hash = "b7968a8fc882f78fddbeba703f218d054664e576"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -523,6 +523,13 @@ version = "0.7.21"
     Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
     Tracker = "9f7883ad-71c0-57eb-9f7f-b5c9e6d3789c"
     Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
+
+[[deps.Dimensionless]]
+deps = ["LinearAlgebra", "Unitful"]
+git-tree-sha1 = "d57e066337ead58265044890809d1a1e9753d949"
+registries = "General"
+uuid = "a24885ee-f44e-4313-a031-cb477fdea68a"
+version = "0.2.0"
 
 [[deps.Distributed]]
 deps = ["Random", "Serialization", "Sockets"]
