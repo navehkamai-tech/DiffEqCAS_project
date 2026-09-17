@@ -45,6 +45,17 @@ end
 
 # 2. Define the rule arrays as constants
 const diff_op_rules = [
+    # Handles explicit higher-order differentials: D(y, m)(D(x, n)(f))
+    @rule(Differential(~y, ~m)(Differential(~x, ~n)(~f)) =>
+        string(~x) < string(~y) ? Differential(~x, ~n)(Differential(~y, ~m)(~f)) : nothing),
+
+    # Handles mixed cases: D(y)(D(x, n)(f)) and D(y, m)(D(x)(f))
+    @rule(Differential(~y)(Differential(~x, ~n)(~f)) =>
+        string(~x) < string(~y) ? Differential(~x, ~n)(Differential(~y)(~f)) : nothing),
+    @rule(Differential(~y, ~m)(Differential(~x)(~f)) =>
+        string(~x) < string(~y) ? Differential(~x)(Differential(~y, ~m)(~f)) : nothing),
+
+    # rule for standard first-order differentials
     @rule(Differential(~y)(Differential(~x)(~f)) =>
         string(~x) < string(~y) ? Differential(~x)(Differential(~y)(~f)) : nothing)
 ]
@@ -69,7 +80,7 @@ const heaviside_rules = [
     @rule(Heaviside(-(~x)) => 1-Heaviside(~x)),
     @acrule(Heaviside(~a::is_pos_param * ~x) => Heaviside(~x)),
     @acrule(Heaviside(~a::is_neg_param * ~x) => 1 - Heaviside(~x)),
-    @rule(Heaviside(~x)^~k::is_pos_param => Heaviside(~x),
+    @rule(Heaviside(~x)^~k::is_pos_param => Heaviside(~x)),
     @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
     @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
     @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
@@ -215,7 +226,7 @@ function change_parameters(sys::PDESystem, param_mapping::Dict)
         push!(transformed_bcs, simplify(SPECIAL_REWRITER(slhs)) ~ simplify(SPECIAL_REWRITER(srhs)))
     end
     # *need to add a helper function for getting the new domains
-    return PDESystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs, ps=new_params, bcs=transformed_bcs, domain=new_domains,name=sys.name)
+    return PDESystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs, ps=new_params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
 end
 
 #helper for change_independents - recursively traverses expression trees
@@ -371,7 +382,7 @@ function change_ivs(sys::PDESystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::
     new_domains = transform_domains(sys.domain, iv_mapping, new_ivs)
 
     new_dvs = [Symbolics.wrap(SymbolicUtils.term(op, Symbolics.unwrap.(new_ivs)...)) for op in dv_funcs]
-    return PDESystem(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs, ps=params, bcs=transformed_bcs, domain=new_domains,name=sys.name)
+    return PDESystem(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs, ps=params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
 end
 
 #helper for change_dependents - recursively traverses expression trees
@@ -466,7 +477,7 @@ function change_dvs(sys::PDESystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::
     end
 
     # Passing sys.params assuming you want to retain the original params block manually
-    return PDESystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs, ps=params, bcs=transformed_bcs,domain=sys.domain,name=sys.name)
+    return PDESystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs, ps=params, bcs=transformed_bcs, domain=sys.domain, name=sys.name)
 end
 
 # helpers for simplify_and_group
@@ -478,7 +489,7 @@ function _is_target(e, unwrapped_dvs::Set, dv_ops)
 
     op = SymbolicUtils.operation(e)
 
-    # Check if the operation matches any of our base dvendent operations
+    # Check if the operation matches any of our base dependent operations
     if any(isequal(op, d_op) for d_op in dv_ops)
         return true
     end
@@ -520,7 +531,6 @@ function _diff_depth(e)
     return 0
 end
 
-# main function
 function simplify_and_group(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
     expr = expand_derivatives(unwrap(eq.lhs - eq.rhs))
 
