@@ -189,12 +189,11 @@ function extract_parameters(list::Tuple, nonparams::AbstractVector = Symbolics.N
     unique_vars = unique(symbols)
     known_vars = Set(unwrap.(nonparams))
 
-    # Filter out known nonparams AND any expression that is a tree (like a Differential)
     params = filter(unique_vars) do v
         val = unwrap(v)
         is_known = val in known_vars
 
-        !is_known && !SymbolicUtils.istree(val)
+        !is_known && ModelingToolkit.isparameter(val)
     end
 
     # Return as Vector{Symbolics.Num} to maintain compatibility with your other functions
