@@ -3,7 +3,7 @@ using Symbolics
 using SymbolicUtils
 using DomainSets
 
-include("my_functions.jl")
+using DiffEqCAS
 
 @parameters t x y
 @variables u(t,x,y)[1:2]
