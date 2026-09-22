@@ -32,11 +32,21 @@ SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
 
 #defining special functions
 #Dirac Delta function
-@register_symbolic Dirac(x::Union{Symbolics.Num,AbstractVector}, n::Int)
-@register_symbolic Dirac(x::Union{Symbolics.Num,AbstractVector})
+@register_symbolic Dirac(x::AbstractVector, n::Any)
+@register_symbolic Dirac(x::AbstractVector)
+@register_symbolic Dirac(x::Symbolics.Num, n::Int)
+@register_symbolic Dirac(x::Symbolics.Num)
+@register_symbolic Dirac(x::Symbolics.Arr, n::Any)
+@register_symbolic Dirac(x::Symbolics.Arr)
+
+
+
+
 
 #Heaviside step function
-@register_symbolic Heaviside(x::Union{AbstractVector,Symbolics.Num})
+@register_symbolic Heaviside(x::AbstractVector)
+@register_symbolic Heaviside(x::Symbolics.Num)
+@register_symbolic Heaviside(x::Symbolics.Arr)
 # 1. Define the helper functions as standard or anonymous functions
 notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
 is_pos_param(var) = notavariable(var) && get_sign(var) == positive
@@ -85,9 +95,9 @@ const heaviside_rules = [
     @acrule(Heaviside(~a::is_neg_param * ~x) => 1 - Heaviside(~x)),
     @rule(Heaviside(~x)^~k::is_pos_param => Heaviside(~x)),
     @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
-    @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
-    @rule(Integral(~vars, ~domain::AbstractVector)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
-    @rule(Integral(~vars, ~domain::AbstractVector)(Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(1))
+    @rule(Differential(~var, ~n)(Heaviside(~var - ~c::notavariable)) => Dirac(~var - ~c, ~n-1)),
+    @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
+    @rule(Integral(~vars, ~domain::DomainSets.Domain)(Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(1))
 ]
 
 # 3. Create the single, compiled rewriter constant
@@ -386,7 +396,7 @@ end
 
 #helper for change_independents - changes domain Dict 
 #*needs updating so it can also separate vars and not only join them together
-function transform_domains_symbolic(old_domain_pairs, iv_mapping::Dict)
+function transform_domains(old_domain_pairs, iv_mapping::Dict)
     new_domain_pairs = Pair[]
 
     for (old_vars, constraints) in old_domain_pairs
@@ -440,7 +450,7 @@ function change_ivs(sys::PDESystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::
     final_ivs = vcat(kept_old_ivs, new_ivs)
     old_u = unwrap.(sys.ivs)
     new_u = unwrap.(new_ivs)
-    dv_funcs = [SymbolicUtils.operation(unwrap(dv)) for dv in sys.dvs]
+    dv_funcs = unique([get_base_op(unwrap(dv)) for dv in sys.dvs])
     params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, iv_exprs)))
 
     J_inv = compute_J_inv(iv_exprs, new_ivs)
@@ -469,46 +479,55 @@ function change_ivs(sys::PDESystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::
 
     new_domains = transform_domains(sys.domain, iv_mapping, new_ivs)
 
-    new_dvs = [Symbolics.wrap(SymbolicUtils.term(op, Symbolics.unwrap.(new_ivs)...)) for op in dv_funcs]
-    return PDESystem(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs, ps=params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
+    new_dvs = [Symbolics.wrap(custom_rewrite(unwrap(dv), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)) for dv in sys.dvs]
+    return PDESystem(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs, ps=params, bcs=transformed_bcs, domain=sys.domain, name=sys.name)
 end
 
-#helper for change_dependents - recursively traverses expression trees
-function substitute_dvs(expr, old_dv_ops, dv_exprs, ivs, cache=Dict())
+
+function substitute_dvs(expr, old_dvs, dv_exprs, ivs, cache=Dict())
     expr = unwrap(expr)
 
     if haskey(cache, expr)
         return cache[expr]
     end
 
-    # If it's a leaf node (e.g., a standalone number or variable not in sub_dict)
     if !SymbolicUtils.istree(expr)
         cache[expr] = expr
         return expr
     end
 
-    op = SymbolicUtils.operation(expr)
-    args = SymbolicUtils.arguments(expr)
+    idx = nothing
+    for (i, dv) in enumerate(old_dvs)
+        if isequal(get_base_op(expr), get_base_op(dv))
+            if isequal(SymbolicUtils.operation(expr), getindex) && isequal(SymbolicUtils.operation(dv), getindex)
+                if isequal(SymbolicUtils.arguments(expr)[2:end], SymbolicUtils.arguments(dv)[2:end])
+                    idx = i
+                    break
+                end
+            elseif isequal(SymbolicUtils.operation(expr), SymbolicUtils.operation(dv))
+                idx = i
+                break
+            end
+        end
+    end
 
-    # Check if the operation matches one of our old dependent variables (e.g., 'u' or 'v')
-    idx = findfirst(isequal(op), old_dv_ops)
     if idx !== nothing
-        # Map the independent variables to whatever arguments are currently inside the function
-        # For u(0, t), this maps x => 0 and t => t
+        curr = expr
+        while isequal(SymbolicUtils.operation(curr), getindex)
+            curr = SymbolicUtils.arguments(curr)[1]
+        end
+        args = SymbolicUtils.arguments(curr)
+
         arg_sub = Dict(wrap.(ivs) .=> wrap.(args))
-
-        # Substitute these arguments into the corresponding new dependent expression
-        # For f(x, t) + g(x, t), this yields f(0, t) + g(0, t)
         res = unwrap(substitute(wrap(dv_exprs[idx]), arg_sub))
-
         cache[expr] = res
         return res
     end
 
-    # Recursively apply to arguments (drilling into Differential operators)
-    new_args = [substitute_dvs(a, old_dv_ops, dv_exprs, ivs, cache) for a in args]
+    op = SymbolicUtils.operation(expr)
+    args = SymbolicUtils.arguments(expr)
+    new_args = [substitute_dvs(a, old_dvs, dv_exprs, ivs, cache) for a in args]
 
-    # Reconstruct the tree if any arguments changed
     if all(a === b for (a, b) in zip(args, new_args))
         cache[expr] = expr
         return expr
@@ -518,6 +537,8 @@ function substitute_dvs(expr, old_dv_ops, dv_exprs, ivs, cache=Dict())
     cache[expr] = res
     return res
 end
+
+
 
 function change_dvs(sys::PDESystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
     # 1. Align expressions with the existing dvendency order
@@ -536,7 +557,7 @@ function change_dvs(sys::PDESystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::
     final_dvs = vcat(kept_old_dvs, new_dvs)
 
     ivs = unwrap.(sys.ivs)
-    old_dv_ops = [SymbolicUtils.operation(unwrap(dv)) for dv in sys.dvs]
+    old_dvs = unwrap.(sys.dvs)
     u_dv_exprs = unwrap.(dv_exprs)
 
     params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, dv_exprs)))
@@ -547,7 +568,7 @@ function change_dvs(sys::PDESystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::
         lhs_expr = unwrap(eq.lhs - eq.rhs)
 
         # Traverse and forcefully substitute inside Differentials
-        substituted_lhs = substitute_dvs(lhs_expr, old_dv_ops, u_dv_exprs, ivs)
+        substituted_lhs = substitute_dvs(lhs_expr, old_dvs, u_dv_exprs, ivs)
         simplified_lhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(substituted_lhs))))
 
         push!(transformed_eqs, simplified_lhs ~ 0)
@@ -555,10 +576,10 @@ function change_dvs(sys::PDESystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::
 
     transformed_bcs = Symbolics.Equation[]
     for bc in sys.bcs
-        substituted_lhs = substitute_dvs(unwrap(bc.lhs), old_dv_ops, u_dv_exprs, ivs)
+        substituted_lhs = substitute_dvs(unwrap(bc.lhs), old_dvs, u_dv_exprs, ivs)
         simplified_lhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(substituted_lhs))))
 
-        substituted_rhs = substitute_dvs(unwrap(bc.rhs), old_dv_ops, u_dv_exprs, ivs)
+        substituted_rhs = substitute_dvs(unwrap(bc.rhs), old_dvs, u_dv_exprs, ivs)
         simplified_rhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(substituted_rhs))))
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
@@ -770,3 +791,13 @@ end
 #endregion
 
 println("my_functions.jl ran successfully")
+function get_base_op(expr)
+    if SymbolicUtils.istree(expr)
+        op = SymbolicUtils.operation(expr)
+        if op == getindex
+            return get_base_op(SymbolicUtils.arguments(expr)[1])
+        end
+        return op
+    end
+    return expr
+end
