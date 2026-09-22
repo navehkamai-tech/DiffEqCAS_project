@@ -24,8 +24,8 @@ SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
 @register_symbolic Dirac(x::AbstractVector)
 @register_symbolic Dirac(x::Symbolics.Num, n::Int)
 @register_symbolic Dirac(x::Symbolics.Num)
-@register_symbolic Dirac(x::Symbolics.Arr, n::Any)
-@register_symbolic Dirac(x::Symbolics.Arr)
+#@register_symbolic Dirac(x::Symbolics.Arr, n::Any)
+#@register_symbolic Dirac(x::Symbolics.Arr)
 
 
 #Heaviside step function

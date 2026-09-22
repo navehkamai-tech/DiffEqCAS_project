@@ -3,7 +3,7 @@ using Symbolics
 using SymbolicUtils
 using DomainSets
 
-include("my_functions.jl")
+using DiffEqCAS
 
 function get_base_op(expr)
     if SymbolicUtils.istree(expr)

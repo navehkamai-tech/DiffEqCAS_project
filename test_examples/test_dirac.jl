@@ -2,7 +2,7 @@ using Symbolics
 using SymbolicUtils
 import SymbolicUtils: @rule, @acrule
 
-include("my_functions.jl")
+using DiffEqCAS
 
 @variables x y
 

@@ -2,7 +2,7 @@ using ModelingToolkit
 using Symbolics
 using DomainSets
 
-include("my_functions.jl")
+using DiffEqCAS
 
 @parameters t x
 @variables u(t,x)[1:2]
