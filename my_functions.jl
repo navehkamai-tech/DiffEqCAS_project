@@ -3,10 +3,13 @@ this is a CAS I'm building to handle and manipulate systems of Differential equa
 the goal is for it to be quite general and be able to handle all systems of any order, with any number of equations, independent variables, dependent variables, and so forth
 in addition my aim is to have leave the possibility of numeric computation open for the future, so design choices must be made with that in mind
 =#
-using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unitful
+using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unitful, IntervalArithmetic
+import IntervalConstraintProgramming as ICP
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute
 import SymbolicUtils: maketerm, @rule, @acrule
+import ModelingToolkit: PDESystem
 
+#region special functions
 #defining sign metadata for symbols
 @enum SignState positive negative undetermined
 struct VariableSign end
@@ -83,13 +86,15 @@ const heaviside_rules = [
     @rule(Heaviside(~x)^~k::is_pos_param => Heaviside(~x)),
     @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
     @rule(Differential(~var, ~n)(Heaviside(~var - ~c::is_scalar)) => Dirac(~var - ~c, ~n-1)),
-    @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
-    @rule(Integral(~vars, ~domain::DomainSets.Domain)(Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(1))
+    @rule(Integral(~vars, ~domain::AbstractVector)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
+    @rule(Integral(~vars, ~domain::AbstractVector)(Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(1))
 ]
 
 # 3. Create the single, compiled rewriter constant
 const SPECIAL_REWRITER = SymbolicUtils.Postwalk(SymbolicUtils.Chain(vcat(diff_op_rules, dirac_rules, heaviside_rules)))
+#endregion
 
+#region API/UI
 #shorthand for creating Differentials
 function D(vars...)
     # 1. Sort the provided variables alphabetically right away
@@ -98,39 +103,6 @@ function D(vars...)
     # 2. Return a custom operator that nests the Differentials from the inside out
     return expr -> foldr((v, ex) -> Differential(v)(ex), sorted_vars, init=expr)
 end
-
-#generic helpers
-function compute_J_inv(var_exprs, new_vars)
-    J_T = transpose(jacobian(var_exprs, new_vars))
-    J_inv = inv(Matrix(J_T))
-    return simplify.(J_inv)
-end
-
-function chain_rule(J_inv, old_var_idx, new_vars, arg, order=1)
-    term = wrap(arg)
-    # Iteratively apply the chain rule for higher-order derivatives
-    for _ in 1:order
-        next_term = 0
-        for j in eachindex(new_vars)
-            D_j = Differential(new_vars[j])
-            next_term += J_inv[old_var_idx, j] * D_j(term)
-        end
-        # Unwrap for the next iteration to maintain type consistency
-        term = next_term
-    end
-    return unwrap(term)
-end
-
-function expr_to_domain(expr, vars)
-    vars_array = vars isa AbstractVector ? Symbolics.unwrap.(vars) : [Symbolics.unwrap(vars)]
-    # Similar to your transform_domains logic[cite: 1]
-    expr_unwrapped = Symbolics.unwrap(expr)
-    func_expr, _ = Symbolics.build_function(expr_unwrapped, vars_array, expression=Val{false})
-
-    # SuperlevelSet(f, c) creates the domain where f(x) >= c
-    return DomainSets.SuperlevelSet(x -> func_expr(collect(x)), 0.0)
-end
-
 
 function display_expr(expr)
     # Unwrap to access the raw SymbolicUtils tree
@@ -171,12 +143,139 @@ function display_expr(expr)
     return wrap(SymbolicUtils.similarterm(expr_unwrapped, op, processed_args))
 end
 
-display_pde(expr) = display_expr(expr)
-
 function display_pde(eq::Symbolics.Equation)
     return display_expr(eq.lhs) ~ display_expr(eq.rhs)
 end
 
+display_pde(expr) = display_expr(expr)
+#endregion
+
+#region domain handling
+function expr_to_domain(expr, vars)
+    vars_array = vars isa AbstractVector ? Symbolics.unwrap.(vars) : [Symbolics.unwrap(vars)]
+    # Similar to your transform_domains logic[cite: 1]
+    expr_unwrapped = Symbolics.unwrap(expr)
+    func_expr, _ = Symbolics.build_function(expr_unwrapped, vars_array, expression=Val{false})
+    # SuperlevelSet(f, c) creates the domain where f(x) >= c
+    new_domain = DomainSets.SuperlevelSet(x -> func_expr(collect(x)), 0.0)
+    if new_domain === DomainSets.EmptySpace
+        throw(DomainError("resulting domain is empty"))
+    end
+    return new_domain
+end
+
+# 1. Internal mutating helper (operates on the mutable groups structure)
+function _add_constraint!(groups::Vector{Tuple{Set{Any},Vector{Any}}}, nc)
+    nc_unwrapped = Symbolics.unwrap(nc)
+    nc_vars = Set(Symbolics.get_variables(nc_unwrapped))
+
+    intersecting_indices = Int[]
+    for i in eachindex(groups)
+        if !isdisjoint(groups[i][1], nc_vars)
+            push!(intersecting_indices, i)
+        end
+    end
+
+    if isempty(intersecting_indices)
+        push!(groups, (nc_vars, Any[nc]))
+    else
+        first_idx = intersecting_indices[1]
+        union!(groups[first_idx][1], nc_vars)
+        push!(groups[first_idx][2], nc)
+
+        for i in reverse(intersecting_indices[2:end])
+            union!(groups[first_idx][1], groups[i][1])
+            append!(groups[first_idx][2], groups[i][2])
+            deleteat!(groups, i)
+        end
+    end
+    return groups
+end
+
+# 2. Plural API function (Handles array initialization and finalization)
+function add_constraints(domain_pairs::Vector{Pair}, new_constraints::AbstractVector)
+    groups = Vector{Tuple{Set{Any},Vector{Any}}}()
+    for (k, c) in domain_pairs
+        k_set = k isa Tuple ? Set(k) : Set([k])
+        push!(groups, (k_set, collect(Any, c)))
+    end
+
+    for nc in new_constraints
+        _add_constraint!(groups, nc) # Mutates in-place, preventing array allocations
+    end
+
+    final_pairs = Pair[]
+    for (vars_set, constraints) in groups
+        vars_arr = collect(vars_set)
+        new_key = length(vars_arr) == 1 ? vars_arr[1] : Tuple(vars_arr)
+        push!(final_pairs, new_key => constraints)
+    end
+
+    return final_pairs
+end
+
+const ROI = 1e3
+#helper for constraints_to_domain
+function shrink_bounds!(bounds, constraint)
+    vars = Symbolics.get_variables(constraint)
+    if !(length(vars)==1)
+        return bounds
+    end
+    var=vars[1]
+    expr = simplify(constraint.lhs-constraint.rhs)
+    if !(Symbolics.degree(expr, var)==1)
+        return bounds
+    end
+    op = Symbolics.operation(constraint)
+    coeff = Symbolics.coeff(expr, var)
+    num = substitute(expr, var => 0)/coeff
+    if (((op === <) || (op === ≤)) && (coeff > 0)) || (((op === >) || (op === ≥))&&(coeff < 0))
+        bounds[var][2] = min(-num, bounds[var][2])
+    elseif (((op === <) || (op === ≤)) && (coeff < 0)) || (((op === >) || (op === ≥))&&(coeff > 0))
+        bounds[var][1] = max(-num, bounds[var][1])
+    end
+    return bounds
+end
+
+function constraints_to_domain(domain::Vector{Pair})
+    bounds = Dict()
+
+    C = ICP.constraint(domain[1].second[1], domain[1].first)
+    for (vars, constraints) in domain
+        vars_list = vars isa Tuple ? vars : (vars,)
+        for v in vars_list
+            bounds[v] = [-ROI, ROI]
+        end
+        for c in constraints
+            u_c = unwrap(c)
+            C = C ∩ constraint(u_c, vars_list)
+            shrink_bounds!(bounds, c)
+        end
+    end
+
+end
+#endregion
+
+#region reusable computation helpers
+function compute_J_inv(var_exprs, new_vars)
+    J_T = transpose(jacobian(var_exprs, new_vars))
+    J_inv = inv(Matrix(J_T))
+    return simplify.(J_inv)
+end
+
+function chain_rule(J_inv, old_var_idx, new_vars, arg, order=1)
+    term = wrap(arg)
+    # Iteratively apply the chain rule for higher-order derivatives
+    for _ in 1:order
+        next_term = 0
+        for j in eachindex(new_vars)
+            D_j = Differential(new_vars[j])
+            next_term += J_inv[old_var_idx, j] * D_j(term)
+        end
+        term = next_term
+    end
+    return unwrap(term)
+end
 #parameter helper
 function extract_parameters(list::Tuple)
     symbols = Symbolics.Num[]
@@ -203,7 +302,9 @@ function extract_parameters(list::Tuple)
     # Return as Vector{Symbolics.Num} to maintain compatibility with your other functions
     return convert(Vector{Symbolics.Num}, wrap.(params))
 end
+#endregion
 
+#region changes of variables
 #for just changing parameters
 function change_parameters(sys::PDESystem, param_mapping::Dict)
     # Pass 1: Raw substitution without the special rewriter
@@ -284,50 +385,36 @@ function custom_rewrite(expr, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, c
 end
 
 #helper for change_independents - changes domain Dict 
-function transform_domains(old_domains::DomainSets.Domain, iv_mapping::Dict, new_ivs::Vector{Symbolics.Num})
+#*needs updating so it can also separate vars and not only join them together
+function transform_domains_symbolic(old_domain_pairs, iv_mapping::Dict)
     new_domain_pairs = Pair[]
 
-    for (old_vars, dom) in old_domains
+    for (old_vars, constraints) in old_domain_pairs
         # Normalize the key to a tuple for uniform processing
         var_tuple = old_vars isa Tuple ? old_vars : (old_vars,)
 
         # Check if any variable in this specific domain block is being mapped
         if any(haskey(iv_mapping, v) for v in var_tuple)
 
-            # 1. Grab the substitution expressions (e.g., [r*cos(θ), r*sin(θ)])
-            exprs = [get(iv_mapping, v, v) for v in var_tuple]
+            # 1. Substitute the mapping directly into the symbolic constraints
+            # This applies the coordinate transformation algebraically
+            new_constraints = [simplify(substitute(c, iv_mapping)) for c in constraints]
 
-            # 2. Find all unique new variables present in these expressions
+            # 2. Identify the new variables that make up this transformed domain
             found_vars = Set{Symbolics.Num}()
-            for expr in exprs
-                union!(found_vars, Symbolics.get_variables(Symbolics.unwrap(expr)))
+            for nc in new_constraints
+                union!(found_vars, Symbolics.get_variables(Symbolics.unwrap(nc)))
             end
 
-            # Preserve the strict ordering defined by the user in `new_ivs`
-            new_vars = Tuple(filter(v -> v in found_vars, new_ivs))
+            # 3. Format the new key (tuple for 2D+, single var for 1D)
+            found_vars_arr = collect(found_vars)
+            new_key = length(found_vars_arr) == 1 ? found_vars_arr[1] : Tuple(found_vars_arr)
 
-            # 3. Compile a numeric function: F(new_vars) -> old_vars
-            # We must unwrap to work directly with SymbolicUtils expressions
-            exprs_unwrapped = Symbolics.unwrap.(exprs)
-            new_vars_unwrapped = Symbolics.unwrap.(new_vars)
-
-            # build_function creates an executable Julia function out of the AST
-            func_expr, _ = Symbolics.build_function(exprs_unwrapped, collect(new_vars_unwrapped), expression=Val{false})
-
-            # DomainSets prefers functions that take vectors/tuples as single arguments
-            forward_map = x -> func_expr(collect(x))
-
-            # 4. Wrap the old domain via its pre-image
-            # MappedDomain(f, d) represents all points x such that f(x) ∈ d.
-            new_dom = DomainSets.MappedDomain(forward_map, dom)
-
-            # 5. Push to the new array, flattening the key if it's 1D
-            new_key = length(new_vars) == 1 ? new_vars[1] : new_vars
-            push!(new_domain_pairs, new_key => new_dom)
-
+            # Push the updated symbolic pair
+            push!(new_domain_pairs, new_key => new_constraints)
         else
-            # If no mapping affects this block, pass it through unchanged
-            push!(new_domain_pairs, old_vars => dom)
+            # If no mapping affects this block, pass it through unchanged[cite: 1]
+            push!(new_domain_pairs, old_vars => constraints)
         end
     end
 
@@ -335,6 +422,7 @@ function transform_domains(old_domains::DomainSets.Domain, iv_mapping::Dict, new
 end
 
 function change_ivs(sys::PDESystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
+    #make sure iv_mapping is from old variables to expressions containing new variables
     iv_exprs = Symbolics.Num[]
     for old_iv in sys.ivs
         if haskey(iv_mapping, old_iv)
@@ -479,6 +567,74 @@ function change_dvs(sys::PDESystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::
     # Passing sys.params assuming you want to retain the original params block manually
     return PDESystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs, ps=params, bcs=transformed_bcs, domain=sys.domain, name=sys.name)
 end
+#endregion
+
+#region equation simplifiers
+#helpers for divide_common
+function get_addends(expr)
+    expr = Symbolics.unwrap(expr)
+    if SymbolicUtils.istree(expr) && SymbolicUtils.operation(expr) === (+)
+        return reduce(vcat, get_addends.(SymbolicUtils.arguments(expr)))
+    end
+    return [expr]
+end
+
+function get_factors(expr)
+    expr = Symbolics.unwrap(expr)
+    if SymbolicUtils.istree(expr) && SymbolicUtils.operation(expr) === (*)
+        return reduce(vcat, get_factors.(SymbolicUtils.arguments(expr)))
+    end
+    return [expr]
+end
+
+function is_divisible(expr, sys::PDESystem)
+    if !SymbolicUtils.istree(expr)
+        if (isequal(expr, p) for p in sys.ps)
+            return true
+        elseif (p isa Number) && p != 0
+            return true
+        elseif (isequal(expr, p) for p in sys.ivs)
+
+        end
+    end
+end
+
+function extract_and_divide_common(expr)
+    expr_unwrapped = Symbolics.unwrap(expr)
+
+    # Get a flat list of every term separated by a + or -
+    addends = get_addends(expr_unwrapped)
+
+    if length(addends) <= 1
+        return expr
+    end
+
+    # Break the first addend into its multiplicative components to use as a baseline
+    common_factors = get_factors(addends[1])
+
+    # Intersect factors across all other addends
+    for i in 2:length(addends)
+        current_factors = get_factors(addends[i])
+
+        # Keep only the factors that exist in BOTH the baseline and the current term
+        filter!(f -> f in current_factors, common_factors)
+
+        # Early exit if we lose all common factors
+        if isempty(common_factors)
+            break
+        end
+    end
+
+    # Reconstruct the common divisor by multiplying the surviving factors
+    if !isempty(common_factors)
+        common_divisor = prod(common_factors)
+
+        # needs modification for checking if dividing is allowed, depending on the type of common_divisor and on the domain.
+        return simplify(expr_unwrapped / common_divisor)
+    end
+
+    return expr
+end
 
 # helpers for simplify_and_group
 function _is_target(e, unwrapped_dvs::Set, dv_ops)
@@ -542,17 +698,21 @@ function simplify_and_group(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
     _find_targets!(expr, unwrapped_dvs, dv_ops, targets)
 
     # Sort targets safely using the external helper
-    sorted_targets = sort(collect(targets), by=_diff_dvth, rev=true)
+    sorted_targets = sort(collect(targets), by=_diff_depth, rev=true)
 
     grouped_expr = 0
     remainder = expr
 
     for target in sorted_targets
-        coeff = simplify(expand_derivatives(Differential(target)(remainder)))
+        max_deg = Symbolics.degree(remainder)
+        for p in max_deg:-1:1
+            target_term = p==1 ? target : target^p
+            coeff = simplify(Symbolics.coeff(remainder, target_term))
 
-        if !isequal(coeff, 0)
-            grouped_expr += coeff * wrap(target)
-            remainder = simplify(remainder - coeff * target)
+            if !isequal(coeff, 0)
+                grouped_expr += coeff * wrap(target)
+                remainder = simplify(remainder - coeff * target_term)
+            end
         end
     end
 
@@ -560,6 +720,26 @@ function simplify_and_group(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
 
     return grouped_expr ~ 0
 end
+#endregion
+
+#region units handling 
+const SI_BASIS = [:Mass, :Length, :Time, :Temperature, :Current, :Luminosity, :Amount]
+
+#=
+if defining a custom basis with a new unit U with dimension D, then each unit in the system that has a non zero power of U needs to be redefined with U
+example - defining heat as a new basis unit:
+
+Unitful.register(@__MODULE__)
+@dimension 𝐇 "𝐇" Heat
+@refunit J_h "J_h" HeatJoule 𝐇 true
+const Heat_Basis = vcat(SI_BASIS,[:Heat])
+
+then defining a modified version of another unit such as Watt for this system:
+
+@unit W_h "W_h" HeatWatt 1J_h/s true (true for automatic metric prefixes and scaling)
+
+good practice to have the custom basis unit in the subscript of the modified unit
+    =#
 
 #helpers for nondimensionalize_pde
 function has_full_dimensions(sys::PDESystem)
@@ -567,27 +747,26 @@ function has_full_dimensions(sys::PDESystem)
     return !any(getunit(v)===nothing for v in symbols)
 end
 
-function has_valid_units(eq::Symbolics.Equation)
-    return eq.rhs==0||ModelingToolkit.get_unit(eq.lhs)==ModelingToolkit.get_unit(eq.rhs)
-end
+function get_units_vector(var, basis::AbstractVector{Symbol}=SI_BASIS)
+    # 1. Extract the unit and underlying dimensions
+    u = ModelingToolkit.get_unit(var)
+    d = dimension(u)
+    dims = typeof(d).parameters[1]
 
-function find_dimension_matrix(symlist::Vector{Symbolics.Num})
-    B=[]
-    for sym in symlist
+    # 2. Initialize a dictionary with 0//1 for every dimension in our basis
+    powers = Dict{Symbol,Rational{Int}}(dim => 0//1 for dim in basis)
 
-    end
-end
-
-function nondimensionalize_pde(sys::PDESystem)
-    if !has_full_dimensions(sys)
-        throw(IOError("all symbols must have units for nondimensionalization"))
-    end
-    for eq in vcat(sys.eqs, sys.bcs)
-        if !has_valid_units(eq)
-            throw(IOError("$(eq) has different units on each side"))
+    # 3. Populate the dictionary with the extracted rational powers
+    for dim in dims
+        dim_name = Unitful.name(dim)
+        if haskey(powers, dim_name)
+            powers[dim_name] = Unitful.power(dim)
         end
     end
 
+    # 4. Extract and return the values in the exact order of the basis array
+    return [powers[b] for b in basis]
 end
+#endregion
 
 println("my_functions.jl ran successfully")
