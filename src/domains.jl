@@ -50,6 +50,7 @@ function add_constraints(domain_pairs::Vector{Pair}, new_constraints::AbstractVe
 end
 
 const ROI = Ref{Float64}(1000.0)
+const tolerance = Ref{Float64}(0.01)
 #=
 this is how to Change the global bound for this session
 DiffEqCAS.ROI[] = 50000.0
@@ -77,20 +78,72 @@ function shrink_bounds!(bounds, constraint)
     return bounds
 end
 
-function constraints_to_domain(domain::Vector{Pair})
-    bounds = Dict()
+function constraints_to_domain(domain_pairs::Vector{Pair})
+    if isempty(domain_pairs)
+        return nothing
+    end
 
-    C = ICP.constraint(domain[1].second[1], domain[1].first)
-    for (vars, constraints) in domain
+    # 1. Establish canonical order
+    all_vars = Any[]
+    for (vars, _) in domain_pairs
         vars_list = vars isa Tuple ? vars : (vars,)
-        for v in vars_list
-            bounds[v] = [-ROI[], ROI[]]
-        end
+        append!(all_vars, vars_list)
+    end
+
+    bounds = Dict{Any,Vector{Float64}}()
+    for v in all_vars
+        bounds[v] = [-ROI[], ROI[]]
+    end
+
+    # 2. Build constraints over the full canonical space
+    local C = nothing
+    for (_, constraints) in domain_pairs
         for c in constraints
-            u_c = unwrap(c)
-            C = C ∩ constraint(u_c, vars_list)
+            u_c = Symbolics.unwrap(c)
+
+            # Pass all_vars instead of the local vars_list
+            new_C = ICP.constraint(u_c, all_vars)
+
+            C = C === nothing ? new_C : C ∩ new_C
             shrink_bounds!(bounds, c)
         end
     end
+
+    # 3. Construct the bounding box using the exact canonical order
+    intervals = [interval(bounds[v][1], bounds[v][2]) for v in all_vars]
+    Box = IntervalBox(intervals...)
+
+    (domain, boundary) = ICP.pave(C, Box, tolerance[])
+    return (domain, boundary)
+end
+
+#=
+next step: 
+writing functions that use constraints_to_domain to check if:
+a vector is in the domain
+anywhere in the domain a variable reaches a certain value
+=#
+
+function is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector, include_boundary=true)
+    total_length = 0
+    for pair in domain_constraints
+        key = pair.first
+        for _ in key
+            total_length = + 1
+        end
+    end
+    if length(v1) != total_length
+        throw(IOError("coords must have the same dimension as domain"))
+    end
+
+    if !include_boundary
+        domain, _ = constraints_to_domain(domain_constraints)
+        return any(coord ∈ box for box in domain)
+    end
+    domain, boundary=constraints_to_domain(domain_constraints)
+    return any(coord ∈ box for box in union(domain, boundary))
+end
+
+function anywhere_in_domain(constraint, domain)
 
 end

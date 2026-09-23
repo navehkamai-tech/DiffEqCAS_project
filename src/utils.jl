@@ -64,3 +64,9 @@ function get_base_op(expr)
     end
     return expr
 end
+
+#=
+need a builder function for PDEs. 
+one thing it should do is order the domain constraints the same way the variables are ordered in PDEsystem.ivs 
+it should also be a major part of the UI and make it easier, more convenient, and less error prone to initialize a system.
+=#
