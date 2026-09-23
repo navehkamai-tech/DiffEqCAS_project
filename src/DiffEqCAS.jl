@@ -23,7 +23,6 @@ include("domains.jl")
 include("symbolic_rules.jl")
 
 # 3. Independent modules
-include("build.jl")
 include("display.jl")
 include("simplification.jl")
 include("units.jl")
