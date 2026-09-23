@@ -1,5 +1,7 @@
 # DiffEqCAS.jl
 
+> **Disclaimer:** This is an amateur hobby project, and it is uncertain how far it will be developed. It is currently a work in progress and is still far from fully functional.
+
 `DiffEqCAS` is a Computer Algebra System (CAS) built in Julia, specifically designed to handle and manipulate general systems of Differential Equations.
 
 ## Goals and Design Philosophy
