@@ -6,7 +6,7 @@
 
 The primary goal of this package is to be highly general: it is built to handle differential equation systems of any order, with any number of equations, independent variables, dependent variables, and parameters.
 
-Furthermore, `DiffEqCAS` is designed with the possibility of numerical computation open for the future. Design choices in the symbolic representation and transformations have been made with this compatibility in mind, ensuring a seamless bridge between symbolic manipulation and eventual numerical solvers.
+Furthermore, `DiffEqCAS` is designed to be used in tandem with numerical methods and as part of a computational pipeline. The module itself aims to stay away from numerical computation as much as possible, but is built to interface nicely with numerical SciML differential equation solver packages. Design choices in the symbolic representation and transformations have been made with this compatibility in mind, ensuring a seamless bridge between symbolic manipulation and numerical solvers.
 
 ## Core Features
 
