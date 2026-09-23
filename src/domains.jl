@@ -110,19 +110,12 @@ function constraints_to_domain(domain_pairs::Vector{Pair})
     end
 
     # 3. Construct the bounding box using the exact canonical order
-    intervals = [interval(bounds[v][1], bounds[v][2]) for v in all_vars]
+    intervals = [bareinterval(bounds[v][1], bounds[v][2]) for v in all_vars]
     Box = IntervalBox(intervals...)
 
     (domain, boundary) = ICP.pave(C, Box, tolerance[])
     return (domain, boundary)
 end
-
-#=
-next step: 
-writing functions that use constraints_to_domain to check if:
-a vector is in the domain
-anywhere in the domain a variable reaches a certain value
-=#
 
 function is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector, include_boundary=true)
     total_length = 0
@@ -144,6 +137,12 @@ function is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractV
     return any(coord ∈ box for box in union(domain, boundary))
 end
 
-function anywhere_in_domain(constraint, domain)
-
+function anywhere_in_domain(constraints, domain_constraints, include_boundary=true)
+    new_constraints = add_constraints(domain_constraints, constraints)
+    if !include_boundary
+        domain, _ = constraints_to_domain(new_constraints)
+        return !isempty(domain)
+    end
+    domain, boundary = constraints_to_domain(new_constraints)
+    return !(isempty(domain) && isempty(boundary))
 end
