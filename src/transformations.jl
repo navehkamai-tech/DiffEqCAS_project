@@ -44,7 +44,7 @@ function custom_rewrite(expr, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, c
 
     # Intercept dependent variables (e.g., changing u(x,y) to u(r,θ))
     # Done top-down, skipping the arguments inside so they never become polar coordinates.
-    if any(isequal(op, d) for d in dv_funcs)
+    if _contains_equal(dv_funcs, op)
         res = unwrap(op(new_u...))
         cache[expr] = res
         return res
@@ -78,41 +78,44 @@ function custom_rewrite(expr, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, c
     return res
 end
 
-#helper for change_independents - changes domain Dict 
-#*needs updating so it can also separate vars and not only join them together
-function transform_domains(old_domain_pairs, iv_mapping::Dict)
+function _mapped_domain_variables(var_tuple, new_constraints, iv_mapping)
+    variables = Any[]
+
+    # Keep variables from the original key, including unconstrained ones.
+    for variable in var_tuple
+        mapped = haskey(iv_mapping, variable) ? substitute(variable, iv_mapping) : variable
+        for mapped_variable in Symbolics.get_variables(Symbolics.unwrap(mapped))
+            push!(variables, mapped_variable)
+        end
+    end
+
+    # Include variables introduced by the transformed constraint expressions.
+    for constraint in new_constraints
+        for variable in Symbolics.get_variables(Symbolics.unwrap(constraint))
+            push!(variables, variable)
+        end
+    end
+    return _ordered_unique(variables)
+end
+
+# Transform domain constraints and canonicalize their keys in the target IV order.
+function transform_domains(old_domain_pairs, iv_mapping::Dict, ivs=nothing)
     new_domain_pairs = Pair[]
 
     for (old_vars, constraints) in old_domain_pairs
-        # Normalize the key to a tuple for uniform processing
-        var_tuple = old_vars isa Tuple ? old_vars : (old_vars,)
+        var_tuple = _key_variables(old_vars)
 
-        # Check if any variable in this specific domain block is being mapped
-        if any(haskey(iv_mapping, v) for v in var_tuple)
-
-            # 1. Substitute the mapping directly into the symbolic constraints
-            # This applies the coordinate transformation algebraically
+        if any(haskey(iv_mapping, variable) for variable in var_tuple)
             new_constraints = [simplify(substitute(c, iv_mapping)) for c in constraints]
-
-            # 2. Identify the new variables that make up this transformed domain
-            found_vars = Set{Symbolics.Num}()
-            for nc in new_constraints
-                union!(found_vars, Symbolics.get_variables(Symbolics.unwrap(nc)))
-            end
-
-            # 3. Format the new key (tuple for 2D+, single var for 1D)
-            found_vars_arr = collect(found_vars)
-            new_key = length(found_vars_arr) == 1 ? found_vars_arr[1] : Tuple(found_vars_arr)
-
-            # Push the updated symbolic pair
+            found_vars = _mapped_domain_variables(var_tuple, new_constraints, iv_mapping)
+            new_key = length(found_vars) == 1 ? found_vars[1] : Tuple(found_vars)
             push!(new_domain_pairs, new_key => new_constraints)
         else
-            # If no mapping affects this block, pass it through unchanged[cite: 1]
             push!(new_domain_pairs, old_vars => constraints)
         end
     end
 
-    return new_domain_pairs
+    return _canonicalize_domain_pairs(new_domain_pairs, ivs)
 end
 
 function change_ivs(sys::PDESystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
@@ -161,10 +164,10 @@ function change_ivs(sys::PDESystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
 
-    new_domains = transform_domains(sys.domain, iv_mapping, new_ivs)
+    new_domains = transform_domains(sys.domain, iv_mapping, final_ivs)
 
     new_dvs = [Symbolics.wrap(custom_rewrite(unwrap(dv), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)) for dv in sys.dvs]
-    return PDESystem(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs, ps=params, bcs=transformed_bcs, domain=sys.domain, name=sys.name)
+    return PDESystem(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs, ps=params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
 end
 
 
