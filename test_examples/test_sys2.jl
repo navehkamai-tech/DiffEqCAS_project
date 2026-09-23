@@ -1,6 +1,5 @@
 using ModelingToolkit
 using Symbolics
-using DomainSets
 
 using DiffEqCAS
 
@@ -18,7 +17,11 @@ eqs = [Dt(u[1]) ~ Dx(Dx(u[1])) + Dy(Dy(u[1])) + u[2],
        Dt(u[3]) ~ u[1]*u[2]]
 
 bcs = [u[1] ~ 0, u[2] ~ 0, u[3] ~ 0]
-domain = [t ∈ Interval(0, 1), x ∈ Interval(-1, 1), y ∈ Interval(-1, 1)]
+domain = [
+    t => [0 < t, t < 1],
+    x => [-1 < x, x < 1],
+    y => [-1 < y, y < 1],
+]
 
 # Create PDESystem (using internal constructors, or just fields)
 sys = PDESystem(eqs, bcs, domain, [t,x,y], [u[1],u[2],u[3]], name=:test_sys)

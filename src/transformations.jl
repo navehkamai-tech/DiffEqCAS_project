@@ -81,18 +81,25 @@ end
 function _mapped_domain_variables(var_tuple, new_constraints, iv_mapping)
     variables = Any[]
 
-    # Keep variables from the original key, including unconstrained ones.
+    # Variables in transformed constraints are the coordinates that actually
+    # describe this domain component. This allows coupled constraints to
+    # collapse when a coordinate becomes redundant, e.g. x^2 + y^2 < 1
+    # becoming r^2 < 1 under polar coordinates.
+    for constraint in new_constraints
+        for variable in Symbolics.get_variables(Symbolics.unwrap(constraint))
+            push!(variables, variable)
+        end
+    end
+
+    # A valid non-degenerate coordinate change should leave a non-constant
+    # transformed constraint. Keep the mapped key as a defensive fallback for
+    # variable-free constraints until degenerate mappings are supported.
+    isempty(variables) || return _ordered_unique(variables)
+
     for variable in var_tuple
         mapped = haskey(iv_mapping, variable) ? substitute(variable, iv_mapping) : variable
         for mapped_variable in Symbolics.get_variables(Symbolics.unwrap(mapped))
             push!(variables, mapped_variable)
-        end
-    end
-
-    # Include variables introduced by the transformed constraint expressions.
-    for constraint in new_constraints
-        for variable in Symbolics.get_variables(Symbolics.unwrap(constraint))
-            push!(variables, variable)
         end
     end
     return _ordered_unique(variables)
