@@ -18,11 +18,11 @@ end
 
 function is_divisible(expr, sys::PDESystem)
     if !SymbolicUtils.istree(expr)
-        if (isequal(expr, p) for p in sys.ps)
+        if _contains_equal(sys.ps, expr)
             return true
-        elseif (p isa Number) && p != 0
+        elseif (expr isa Number) && expr != 0
             return true
-        elseif (isequal(expr, p) for p in sys.ivs)
+        elseif _contains_equal(sys.ivs, expr)
 
         end
     end

@@ -1,4 +1,17 @@
 
+_key_variables(key) = key isa Tuple ? key : (key,)
+
+# Symbolic values may return symbolic expressions from `==`, so use `isequal`.
+_contains_equal(values, target) = any(value -> isequal(value, target), values)
+
+function _ordered_unique(values)
+    result = Any[]
+    for value in values
+        _contains_equal(result, value) || push!(result, value)
+    end
+    return result
+end
+
 function D(vars...)
     # 1. Sort the provided variables alphabetically right away
     sorted_vars = sort(collect(vars), by=string)
