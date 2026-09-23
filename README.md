@@ -48,7 +48,7 @@ Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 - `src/utils.jl`, `src/domains.jl`: Foundational helpers and domain management.
 - `src/symbolic_rules.jl`: Core symbolic logic and rewrite rules.
 - `src/simplification.jl`, `src/units.jl`, `src/display.jl`: Modules for simplification, unit handling, and display.
-- `src/transformations.jl`, `src/special_algorithms.jl`: High-level operations for PDESystem transformations and specialized algorithms.
+- `src/transformations.jl`, `src/special_algorithms.jl`: High-level operations for PDESystem transformations and specialized algorithms (currently essentially empty, but planned to employ advanced simplification methods relying on symmetry and integration techniques).
 
 ## Testing and Examples
 
