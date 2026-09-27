@@ -4,7 +4,7 @@ using Symbolics
 using DiffEqCAS
 
 @parameters t x y
-@variables u(t,x,y)[1:3]
+@variables u(t, x, y)[1:3]
 
 Dt = Differential(t)
 Dx = Differential(x)
@@ -13,8 +13,8 @@ Dy = Differential(y)
 # Test change_ivs
 @parameters r theta
 eqs = [Dt(u[1]) ~ Dx(Dx(u[1])) + Dy(Dy(u[1])) + u[2],
-       Dt(u[2]) ~ Dx(Dx(u[2])) + Dy(Dy(u[2])) + u[1],
-       Dt(u[3]) ~ u[1]*u[2]]
+    Dt(u[2]) ~ Dx(Dx(u[2])) + Dy(Dy(u[2])) + u[1],
+    Dt(u[3]) ~ u[1]*u[2]]
 
 bcs = [u[1] ~ 0, u[2] ~ 0, u[3] ~ 0]
 domain = [
@@ -23,8 +23,8 @@ domain = [
     y => [-1 < y, y < 1],
 ]
 
-# Create PDESystem (using internal constructors, or just fields)
-sys = PDESystem(eqs, bcs, domain, [t,x,y], [u[1],u[2],u[3]], name=:test_sys)
+# Create DiffEqSystem (using internal constructors, or just fields)
+sys = DiffEqSystem(eqs, bcs, domain, [t, x, y], [u[1], u[2], u[3]], name=:test_sys)
 
 # Apply change_ivs
 println("Testing change_ivs:")

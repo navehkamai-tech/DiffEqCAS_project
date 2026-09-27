@@ -1,6 +1,6 @@
 
 #for just changing parameters
-function change_parameters(sys::PDESystem, param_mapping::Dict)
+function change_parameters(sys::DiffEqSystem, param_mapping::Dict)
     # Pass 1: Raw substitution without the special rewriter
     substituted_eqs = [wrap(substitute(eq.lhs - eq.rhs, param_mapping)) for eq in sys.eqs]
     substituted_bcs_lhs = [wrap(substitute(bc.lhs, param_mapping)) for bc in sys.bcs]
@@ -21,7 +21,7 @@ function change_parameters(sys::PDESystem, param_mapping::Dict)
         push!(transformed_bcs, simplify(SPECIAL_REWRITER(slhs)) ~ simplify(SPECIAL_REWRITER(srhs)))
     end
     # *need to add a helper function for getting the new domains
-    return PDESystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs, ps=new_params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
+    return DiffEqSystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs, ps=new_params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
 end
 
 #helper for change_independents - recursively traverses expression trees
@@ -125,7 +125,7 @@ function transform_domains(old_domain_pairs, iv_mapping::Dict, ivs=nothing)
     return _canonicalize_domain_pairs(new_domain_pairs, ivs)
 end
 
-function change_ivs(sys::PDESystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
+function change_ivs(sys::DiffEqSystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
     #make sure iv_mapping is from old variables to expressions containing new variables
     iv_exprs = Symbolics.Num[]
     for old_iv in sys.ivs
@@ -174,7 +174,7 @@ function change_ivs(sys::PDESystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::
     new_domains = transform_domains(sys.domain, iv_mapping, final_ivs)
 
     new_dvs = [Symbolics.wrap(custom_rewrite(unwrap(dv), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)) for dv in sys.dvs]
-    return PDESystem(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs, ps=params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
+    return DiffEqSystem(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs, ps=params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
 end
 
 
@@ -234,7 +234,7 @@ end
 
 
 
-function change_dvs(sys::PDESystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
+function change_dvs(sys::DiffEqSystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
     # 1. Align expressions with the existing dvendency order
     dv_exprs = Symbolics.Num[]
     for old_dv in sys.dvs
@@ -280,5 +280,5 @@ function change_dvs(sys::PDESystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::
     end
 
     # Passing sys.params assuming you want to retain the original params block manually
-    return PDESystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs, ps=params, bcs=transformed_bcs, domain=sys.domain, name=sys.name)
+    return DiffEqSystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs, ps=params, bcs=transformed_bcs, domain=sys.domain, name=sys.name)
 end

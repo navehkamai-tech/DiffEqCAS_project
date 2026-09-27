@@ -1,23 +1,4 @@
 
-#defining sign metadata for symbols
-@enum SignState positive negative undetermined
-struct VariableSign end
-Symbolics.option_to_metadata_type(::Val{:sign}) = VariableSign
-
-function get_sign(var)
-    var_unwrapped = Symbolics.unwrap(var)
-
-    if var_unwrapped isa Real
-        return var_unwrapped > 0 ? positive : (var_unwrapped < 0 ? negative : undetermined)
-    end
-
-    return Symbolics.getmetadata(var_unwrapped, VariableSign, undetermined)
-end
-
-#operator used for boundary conditions
-@register_symbolic Restrict(expr, domain)
-SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
-
 #defining special functions
 #Dirac Delta function
 @register_symbolic Dirac(x::AbstractVector, n::Any)

@@ -1,5 +1,5 @@
 
-function nondimensionalize_pde(sys::PDESystem, basis=SI_BASIS)
+function nondimensionalize_pde(sys::DiffEqSystem, basis=SI_BASIS)
     if !has_full_dimensions(sys)
         throw(IOError("all symbols must have units for nondimensionalization"))
     end

@@ -12,7 +12,7 @@ Furthermore, `DiffEqCAS` is designed to be used in tandem with numerical methods
 
 ## Core Features
 
-Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingToolkit.jl`, and `SymbolicUtils.jl`), `DiffEqCAS` provides high-level tools to manipulate `ModelingToolkit.PDESystem`s.
+Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingToolkit.jl`, and `SymbolicUtils.jl`), `DiffEqCAS` provides high-level tools to manipulate `ModelingToolkit.DiffEqSystem`s.
 
 - **Transformations and Substitutions**: Easily perform coordinate transformations and variable substitutions on entire PDE systems.
   - `change_ivs`: Transform independent variables (e.g., Cartesian to Polar coordinates).
@@ -50,7 +50,7 @@ Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 - `src/utils.jl`, `src/domains.jl`: Foundational helpers and domain management.
 - `src/symbolic_rules.jl`: Core symbolic logic and rewrite rules.
 - `src/simplification.jl`, `src/units.jl`, `src/display.jl`: Modules for simplification, unit handling, and display.
-- `src/transformations.jl`, `src/special_algorithms.jl`: High-level operations for PDESystem transformations and specialized algorithms (currently essentially empty, but planned to employ advanced simplification methods relying on symmetry and integration techniques).
+- `src/transformations.jl`, `src/special_algorithms.jl`: High-level operations for DiffEqSystem transformations and specialized algorithms (currently essentially empty, but planned to employ advanced simplification methods relying on symmetry and integration techniques).
 
 ## Testing and Examples
 

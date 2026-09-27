@@ -11,11 +11,12 @@ using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unit
 import IntervalConstraintProgramming as ICP
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute
 import SymbolicUtils: maketerm, @rule, @acrule
-import ModelingToolkit: PDESystem
+import ModelingToolkit: DiffEqSystem
 
 export change_dvs, change_ivs, change_parameters, simplify_and_group, custom_rewrite, get_base_op, get_sign, Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 
 # 1. Foundational helpers
+include("base.jl")
 include("utils.jl")
 include("domains.jl")
 

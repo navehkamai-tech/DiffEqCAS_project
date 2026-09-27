@@ -4,12 +4,30 @@ _key_variables(key) = key isa Tuple ? key : (key,)
 # Symbolic values may return symbolic expressions from `==`, so use `isequal`.
 _contains_equal(values, target) = any(value -> isequal(value, target), values)
 
+function simplify!(expr::Symbolics.Num)
+    return Symbolics.simplify(expr)
+end
+
+function _find_matches(arr_A, arr_B)
+    matches = []
+    for (i, j) in zip(1:length(arr_A), 1:length(arr_B))
+        if arr_A[i]==arr_B[j]
+            push!(matches, (i, j))
+        end
+    end
+    return matches[]
+end
+
+function _push_unique!(arr, new_vals)
+    for new_val in new_vals
+        _contains_equal(arr, new_val) ? nothing : push!(arr, new_val)
+    end
+    return arr
+end
+
 function _ordered_unique(values)
     result = Any[]
-    for value in values
-        _contains_equal(result, value) || push!(result, value)
-    end
-    return result
+    return _push_unique!(result, values)
 end
 
 function D(vars...)
@@ -76,4 +94,14 @@ function get_base_op(expr)
         return op
     end
     return expr
+end
+
+function simplify!(expr)
+    return Symbolics.simplify(expr)
+end
+function expand!(expr)
+    return Symbolics.expand(expr)
+end
+function expand_derivatives!(expr)
+    return Symbolics.expand_derivatives(expr)
 end

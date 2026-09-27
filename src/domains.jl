@@ -1,4 +1,9 @@
 
+#operator used for boundary conditions
+@register_symbolic Restrict(expr, domain)
+SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
+
+
 function _record_variables!(variables, seen, key_variables)
     for variable in key_variables
         if !_contains_equal(seen, variable)
@@ -213,6 +218,14 @@ function constraints_to_domain(domain_pairs::AbstractVector{<:Pair})
     return (domain, boundary)
 end
 
+function _get_domain(sys::DiffEqSystem)
+    if sys.domain_set === nothing
+        domain, boundary = constraints_to_domain(sys.domain_constraints)
+        return hcat(domain, boundary)
+    end
+    return sys.domain_set
+end
+
 function is_in_domain(
     coord::StaticArrays.SVector,
     domain_constraints::AbstractVector,
@@ -222,9 +235,9 @@ function is_in_domain(
         throw(DimensionMismatch("coords must have the same dimension as domain"))
     end
 
-    result = constraints_to_domain(domain_constraints)
-    result === nothing && return false
-    domain, boundary = result
+    sys.domain_set = _get_domain(domain_constraints)
+    sys.domain_set === nothing && return false
+    domain, boundary = sys.domain_set
     boxes = include_boundary ? (domain..., boundary...) : domain
     return any(coord ∈ box for box in boxes)
 end
@@ -233,11 +246,10 @@ function anywhere_in_domain(
     constraints,
     domain_constraints::AbstractVector{<:Pair},
     include_boundary::Bool=true,
-    ivs=nothing,
 )
     new_constraints = constraints isa AbstractVector || constraints isa Tuple ?
-        constraints : (constraints,)
-    combined = add_constraints(domain_constraints, new_constraints, ivs)
+                      constraints : (constraints,)
+    combined = add_constraints(domain_constraints, new_constraints)
     result = constraints_to_domain(combined)
     result === nothing && return false
     domain, boundary = result
