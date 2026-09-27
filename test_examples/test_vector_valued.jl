@@ -14,11 +14,11 @@ eqs = [Dt(u) ~ Dx(Dx(u))]
 
 @show eqs
 
-# try simplify_and_group
+# try group_coefficients
 try
     for eq in eqs
-        println(simplify_and_group(eq, [u[1], u[2]]))
+        println(group_coefficients(eq, [u[1], u[2]]))
     end
 catch e
-    println("Error in simplify_and_group: ", e)
+    println("Error in group_coefficients: ", e)
 end

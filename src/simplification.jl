@@ -1,9 +1,26 @@
 #rules for stuff simplify doesn't handle well
 #need to add domain checks
-# Rule patterns temporarily disabled due to SymbolicUtils pattern parsing variations.
-exponential_logarithmic_rules = Any[]
-power_rules = Any[]
-absolute_value_rules = Any[]
+exponential_logarithmic_rules = [
+    @rule(exp(~x)/exp(~y) => exp(~x - ~y)),
+    @rule(exp(log(~x)) => ~x),
+    @rule(log(exp(~x)) => ~x),
+    @rule(log(~x)+log(~y) => log(~x * ~y)),
+    @rule(log(~x)-log(~y) => log(~x/~y)),
+    @rule(~n*log(~x) => log(~x^~n)),
+]
+power_rules = [
+    @rule((~x)^(~z)/(~x)^(~y) => (~x)^(~z-~y)),
+    @rule(((~x)^(~y))^(~z) => (~x)^(~y*~z)),
+    @rule(sqrt((~x)^2) => abs(~x)),
+]
+absolute_value_rules = [
+    @rule(abs(~x*~y) => abs(~x)*abs(~y)),
+    @rule(abs((~x)^2) => (~x)^2),
+    @rule(abs((~x)^(2*~n)) => (~x)^(2*~n)),
+    @rule((abs(~x))^2 => (~x)^2),
+    @rule((abs(~x)^(2*~n)) => (~x)^(2*~n)),
+    @rule(abs(~x::is_pos_param) => ~x),
+]
 
 
 #helpers for divide_common
@@ -259,8 +276,4 @@ function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
 
     return grouped_expr ~ 0
 end
-
-# public alias kept for compatibility
-simplify_and_group(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num}) =
-    group_coefficients(eq, dvs)
 

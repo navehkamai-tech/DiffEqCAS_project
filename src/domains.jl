@@ -36,7 +36,8 @@ end
 
 # Canonicalize domain keys while preserving either the supplied IV order or
 # the first-seen order of the domain keys when no IV order is available.
-function _canonicalize_domain_pairs(domain_pairs::AbstractVector{<:Pair}, ivs=nothing)
+function _canonicalize_domain_pairs(domain_pairs, ivs=nothing)
+    domain_pairs = _domain_pairs(domain_pairs)
     variables = ivs === nothing ? Any[] : ivs
     seen = ivs === nothing ? Set{Any}() : nothing
     groups = Vector{Tuple{Set{Any},Vector{Any}}}()
@@ -57,6 +58,7 @@ function _canonicalize_domain_pairs(domain_pairs::AbstractVector{<:Pair}, ivs=no
 end
 
 function _domain_variables(domain_pairs)
+    domain_pairs = _domain_pairs(domain_pairs)
     variables = Any[]
     for (key, _) in domain_pairs
         append!(variables, _key_variables(key))
@@ -120,10 +122,11 @@ end
 # Add constraints to an already-canonical domain. If `ivs` is provided, it
 # controls both the order inside tuple keys and the order of the output groups.
 function add_constraints(
-    domain_pairs::AbstractVector{<:Pair},
+    domain_pairs,
     new_constraints::AbstractVector,
     ivs=nothing,
 )
+    domain_pairs = _domain_pairs(domain_pairs)
     variable_order = ivs === nothing ? _domain_variables(domain_pairs) : collect(ivs)
     ivs !== nothing && _validate_iv_order!(variable_order, domain_pairs)
     groups = [(Set(_key_variables(key)), collect(Any, constraints))
@@ -179,77 +182,55 @@ function shrink_bounds!(bounds, constraint)
     return bounds
 end
 
-# Simple cache to avoid repeated expensive ICP.pave calls for identical domain descriptions
-const _DOMAIN_CACHE = Dict{UInt64, Tuple{Vector{IntervalBox}, Vector{IntervalBox}}}()
-
-function constraints_to_domain(domain_pairs::AbstractVector{<:Pair})
-    if isempty(domain_pairs)
-        return nothing
-    end
-
-    # Use a stable string representation as the cache key
-    cache_key = hash(string(domain_pairs))
-    if haskey(_DOMAIN_CACHE, cache_key)
-        return _DOMAIN_CACHE[cache_key]
-    end
-
-    # 1. Establish canonical order
+function constraints_to_domain(domain_pairs)
+    domain_pairs = _domain_pairs(domain_pairs)
+    isempty(domain_pairs) && return nothing
     all_vars = _domain_variables(domain_pairs)
-
-    bounds = Dict{Any,Vector{Float64}}()
-    for v in all_vars
-        bounds[v] = [-ROI[], ROI[]]
+    bounds = Dict{Any,Vector{Float64}}(v => [-ROI[], ROI[]] for v in all_vars)
+    C = nothing
+    for (_, constraints) in domain_pairs, c in constraints
+        u_c = Symbolics.unwrap(c)
+        constraint_vars = Symbolics.get_variables(u_c)
+        all(v -> haskey(bounds, v), constraint_vars) ||
+            throw(ArgumentError("domain constraints reference variables absent from their domain keys"))
+        new_C = ICP.constraint(u_c, all_vars)
+        C = C === nothing ? new_C : C ∩ new_C
+        shrink_bounds!(bounds, c)
     end
-
-    # 2. Build constraints over the full canonical space
-    local C = nothing
-    for (_, constraints) in domain_pairs
-        for c in constraints
-            u_c = Symbolics.unwrap(c)
-            constraint_vars = Symbolics.get_variables(u_c)
-            all(v -> haskey(bounds, v), constraint_vars) ||
-                throw(ArgumentError("domain constraints reference variables absent from their domain keys"))
-
-            # Pass all_vars instead of the local vars_list
-            new_C = ICP.constraint(u_c, all_vars)
-
-            C = C === nothing ? new_C : C ∩ new_C
-            shrink_bounds!(bounds, c)
-        end
-    end
-
-    # 3. Construct the bounding box using the exact canonical order
     intervals = [bareinterval(bounds[v][1], bounds[v][2]) for v in all_vars]
-    Box = IntervalBox(intervals...)
-
-    result = C === nothing ? ([Box], IntervalBox[]) : ICP.pave(C, Box, tolerance[])
-    _DOMAIN_CACHE[cache_key] = result
-    return result
+    box = IntervalBox(intervals...)
+    C === nothing ? ([box], IntervalBox[]) : ICP.pave(C, box, tolerance[])
 end
 
-function _get_domain(domain_constraints)
-    return constraints_to_domain(domain_constraints)
+function constraints_to_domain(sys::DiffEqSystem)
+    sys.domain_set === nothing && (sys.domain_set = constraints_to_domain(sys.domain))
+    sys.domain_set
 end
 
-function is_in_domain(
-    coord::StaticArrays.SVector,
-    domain_constraints::AbstractVector,
-    include_boundary::Bool=true,
-)
-    if length(coord) != length(_domain_variables(domain_constraints))
+function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqSystem, include_boundary::Bool=true)
+    domain_data = constraints_to_domain(sys)
+    domain_data === nothing && return false
+    length(coord) == length(_domain_variables(sys.domain)) ||
         throw(DimensionMismatch("coords must have the same dimension as domain"))
-    end
+    domain, boundary = domain_data
+    boxes = include_boundary ? (domain..., boundary...) : domain
+    any(coord ∈ box for box in boxes)
+end
 
-    domain_data = _get_domain(domain_constraints)
+function is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector,
+    include_boundary::Bool=true)
+    length(coord) == length(_domain_variables(domain_constraints)) ||
+        throw(DimensionMismatch("coords must have the same dimension as domain"))
+    domain_data = constraints_to_domain(domain_constraints)
     domain_data === nothing && return false
     domain, boundary = domain_data
     boxes = include_boundary ? (domain..., boundary...) : domain
-    return any(coord ∈ box for box in boxes)
+    any(coord ∈ box for box in boxes)
 end
 
 function anywhere_in_domain(
     constraints,
-    domain_constraints::AbstractVector{<:Pair},
+    domain_constraints,
     include_boundary::Bool=true,
 )
     new_constraints = constraints isa AbstractVector || constraints isa Tuple ?

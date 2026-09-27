@@ -15,12 +15,12 @@ eqs = [Dt(u[1]) ~ Dx(Dx(u[1])) + u[2],
 
 dvs = [u[1], u[2]]
 
-println("Testing simplify_and_group:")
+println("Testing group_coefficients:")
 try
     for eq in eqs
-        println(simplify_and_group(eq, dvs))
+        println(group_coefficients(eq, dvs))
     end
 catch e
-    println("Error in simplify_and_group: ", e)
+    println("Error in group_coefficients: ", e)
     Base.display_error(e, catch_backtrace())
 end

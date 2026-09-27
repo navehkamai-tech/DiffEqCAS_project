@@ -107,6 +107,7 @@ end
 
 # Transform domain constraints and canonicalize their keys in the target IV order.
 function transform_domains(old_domain_pairs, iv_mapping::Dict, ivs=nothing)
+    old_domain_pairs = _domain_pairs(old_domain_pairs)
     new_domain_pairs = Pair[]
 
     for (old_vars, constraints) in old_domain_pairs

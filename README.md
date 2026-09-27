@@ -19,13 +19,16 @@ Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingTo
   - `change_dvs`: Substitute or transform dependent variables.
   - `change_parameters`: Substitute parameters within systems.
 - **Simplification and Manipulation**:
-  - `simplify_and_group`: Group terms in equations by derivatives or dependent variables.
+  - `group_coefficients`: Group terms in equations by derivatives or dependent variables.
   - `custom_rewrite`: Advanced rewriting traversing expression trees.
 - **Special Functions and Domains**:
   - Support for generalized functions in differential equations, such as `Dirac` and `Heaviside`.
   - `Restrict`: Handle domain restrictions.
 - **Units and Dimensional Analysis**:
   - Foundational support for unit tracking and nondimensionalization of PDE systems.
+- **Symbolic Domains**:
+  - `SymbolicDomain` stores inspectable variable/constraint pairs for symbolic rules and transformations.
+  - Connected components are preserved as domain components; numerical interval boxes remain a separate derived cache.
 
 ## Main Exports
 
@@ -36,7 +39,7 @@ using DiffEqCAS
 change_dvs, change_ivs, change_parameters
 
 # Simplification
-simplify_and_group, custom_rewrite
+group_coefficients, custom_rewrite
 
 # Utilities
 get_base_op, get_sign
