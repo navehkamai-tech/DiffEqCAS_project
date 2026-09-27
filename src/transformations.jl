@@ -21,7 +21,7 @@ function change_parameters(sys::DiffEqSystem, param_mapping::Dict)
         push!(transformed_bcs, simplify(SPECIAL_REWRITER(slhs)) ~ simplify(SPECIAL_REWRITER(srhs)))
     end
     # *need to add a helper function for getting the new domains
-    return DiffEqSystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs, ps=new_params, bcs=transformed_bcs, domain=new_domains, name=sys.name)
+    return DiffEqSystem(eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs, ps=new_params, bcs=transformed_bcs, domain=sys.domain, name=sys.name)
 end
 
 #helper for change_independents - recursively traverses expression trees

@@ -1,18 +1,43 @@
 
 struct DiffEqSystem
-    name::String
-    ivs::Vector{Symbolics.Num}
-    dvs::Vector{Symbolics.Num}
-    ps::Vector{Symbolics.Num}
-    eqs::Vector{Symbolics.Equation}
-    bcs::Vector{Symbolics.Num}
-    domain_constraints::Vector{Pair{Any,Symbolics.Num}}
-    domain_set::Vector{IntervalBoxes.IntervalBox}
-    trivial_sols::Vector{Pair{Any,Symbolics.Equations}}
+    name
+    ivs
+    dvs
+    ps
+    eqs
+    bcs
+    domain
+    domain_set
+    trivial_sols
+end
 
-    function DiffEqSystem(name="system", ivs, dvs, eqs, bcs, domain_constraints, domain_set=nothing, trivial_solutions=[])
-        new(name, ivs, dvs, eqs, bcs, domain_constraints, domain_set, trivial_solutions)
-    end
+function DiffEqSystem(
+    eqs,
+    bcs,
+    domain,
+    ivs,
+    dvs;
+    ps=Symbolics.Num[],
+    name=:system,
+    domain_set=nothing,
+    trivial_solutions=Any[],
+)
+    return DiffEqSystem(name, ivs, dvs, ps, eqs, bcs, domain, domain_set, trivial_solutions)
+end
+
+function DiffEqSystem(;
+    eqs,
+    ivs,
+    dvs,
+    ps=Symbolics.Num[],
+    bcs=Symbolics.Equation[],
+    domain=Pair[],
+    name=:system,
+    domain_set=nothing,
+    trivial_solutions=Any[],
+)
+    return DiffEqSystem(eqs, bcs, domain, ivs, dvs;
+        ps, name, domain_set, trivial_solutions)
 end
 
 #defining sign metadata for symbols

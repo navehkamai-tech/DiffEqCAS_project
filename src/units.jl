@@ -18,7 +18,7 @@ good practice to have the custom basis unit in the subscript of the modified uni
 
 #helpers for nondimensionalize_pde
 function has_full_dimensions(sys::DiffEqSystem)
-    symbols = vcat(sys.ivs, sys, dvs, sys.ps)
+    symbols = vcat(sys.ivs, sys.dvs, sys.ps)
     return !any(getunit(v)===nothing for v in symbols)
 end
 

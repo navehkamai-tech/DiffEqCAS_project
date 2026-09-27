@@ -179,9 +179,18 @@ function shrink_bounds!(bounds, constraint)
     return bounds
 end
 
+# Simple cache to avoid repeated expensive ICP.pave calls for identical domain descriptions
+const _DOMAIN_CACHE = Dict{UInt64, Tuple{Vector{IntervalBox}, Vector{IntervalBox}}}()
+
 function constraints_to_domain(domain_pairs::AbstractVector{<:Pair})
     if isempty(domain_pairs)
         return nothing
+    end
+
+    # Use a stable string representation as the cache key
+    cache_key = hash(string(domain_pairs))
+    if haskey(_DOMAIN_CACHE, cache_key)
+        return _DOMAIN_CACHE[cache_key]
     end
 
     # 1. Establish canonical order
@@ -213,17 +222,13 @@ function constraints_to_domain(domain_pairs::AbstractVector{<:Pair})
     intervals = [bareinterval(bounds[v][1], bounds[v][2]) for v in all_vars]
     Box = IntervalBox(intervals...)
 
-    C === nothing && return ([Box], IntervalBox[])
-    (domain, boundary) = ICP.pave(C, Box, tolerance[])
-    return (domain, boundary)
+    result = C === nothing ? ([Box], IntervalBox[]) : ICP.pave(C, Box, tolerance[])
+    _DOMAIN_CACHE[cache_key] = result
+    return result
 end
 
-function _get_domain(sys::DiffEqSystem)
-    if sys.domain_set === nothing
-        domain, boundary = constraints_to_domain(sys.domain_constraints)
-        return hcat(domain, boundary)
-    end
-    return sys.domain_set
+function _get_domain(domain_constraints)
+    return constraints_to_domain(domain_constraints)
 end
 
 function is_in_domain(
@@ -235,9 +240,9 @@ function is_in_domain(
         throw(DimensionMismatch("coords must have the same dimension as domain"))
     end
 
-    sys.domain_set = _get_domain(domain_constraints)
-    sys.domain_set === nothing && return false
-    domain, boundary = sys.domain_set
+    domain_data = _get_domain(domain_constraints)
+    domain_data === nothing && return false
+    domain, boundary = domain_data
     boxes = include_boundary ? (domain..., boundary...) : domain
     return any(coord ∈ box for box in boxes)
 end

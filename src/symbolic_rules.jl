@@ -44,8 +44,8 @@ const dirac_rules = [
     @rule(Dirac(~x, ~n) => (is_array_literal(~x) && ~n isa AbstractArray) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el_x), el_n)) for (el_x, el_n) in zip(SymbolicUtils.arguments(~x)[2:end], ~n)]) : nothing),
     @rule(Dirac(~x) => Dirac(~x, 0)),
     @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Dirac(~x, ~n)),
-    @acrule(Dirac(~a::notavariable * ~x, ~n) => Dirac(~x, ~n) / (abs(~a) * (~a)^(~n))),
-    @acrule(Dirac(~a::notavariable*(~x - ~c::Number), ~n) => Dirac(~x - ~c, ~n)/(abs(~a)*(~a)^(~n))),
+    @acrule(Dirac(~a * ~x, ~n) => notavariable(~a) ? Dirac(~x, ~n) / (abs(~a) * (~a)^(~n)) : nothing),
+    @acrule(Dirac(~a*(~x - ~c), ~n) => (notavariable(~a) && (~c isa Number)) ? Dirac(~x - ~c, ~n)/(abs(~a)*(~a)^(~n)) : nothing),
     @rule(~x*Dirac(~x, 0) => 0),
     @rule(~x * Dirac(~x, ~n) => -(~n)*Dirac(~x, ~n-1)),
     @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f * Dirac(~vars - ~c)) =>
@@ -57,11 +57,11 @@ const dirac_rules = [
 
 const heaviside_rules = [
     @rule(Heaviside(-(~x)) => 1-Heaviside(~x)),
-    @acrule(Heaviside(~a::is_pos_param * ~x) => Heaviside(~x)),
-    @acrule(Heaviside(~a::is_neg_param * ~x) => 1 - Heaviside(~x)),
-    @rule(Heaviside(~x)^~k::is_pos_param => Heaviside(~x)),
+    @acrule(Heaviside(~a * ~x) => is_pos_param(~a) ? Heaviside(~x) : nothing),
+    @acrule(Heaviside(~a * ~x) => is_neg_param(~a) ? 1 - Heaviside(~x) : nothing),
+    @rule(Heaviside(~x)^~k => is_pos_param(~k) ? Heaviside(~x) : nothing),
     @rule(Differential(~var, ~n)(Heaviside(~var)) => Dirac(~var, ~n-1)),
-    @rule(Differential(~var, ~n)(Heaviside(~var - ~c::notavariable)) => Dirac(~var - ~c, ~n-1)),
+    @rule(Differential(~var, ~n)(Heaviside(~var - ~c)) => notavariable(~c) ? Dirac(~var - ~c, ~n-1) : nothing),
     @rule(Integral(~vars, ~domain::DomainSets.Domain)(~f*Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(~f)),
     @rule(Integral(~vars, ~domain::DomainSets.Domain)(Heaviside(~expr)) => Integral(~vars, intersect(~domain, expr_to_domain(~expr, ~vars)))(1))
 ]

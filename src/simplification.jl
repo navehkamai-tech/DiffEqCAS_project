@@ -1,27 +1,9 @@
 #rules for stuff simplify doesn't handle well
 #need to add domain checks
-exponential_logarithmic_rules = [
-    @rule(exp(~x)/exp(~y) => exp(~x - ~y)),
-    @rule(exp(log(~x)) => ~x),
-    @rule(log(exp(~x)) => ~x),
-    @rule(log(~x)+log(~y) => log(~x * ~y)),
-    @rule(log(~x)-log(~y) => log(~x/~y)),
-    @rule(~n*log(~x) => log(~x^~n)),
-]
-power_rules = [
-    @rule(~x^~z/(~x^~y) => ~x^(~z-~y))
-    @rule((~x^~y)^~z => ~x^(~y*~z))
-    @rule(sqrt((~x)^2) => abs(~x))
-]
-
-absolute_value_rules = [
-    @rule(abs(~x*~y) => abs(~x)*abs(~y))
-    @rule(abs((~x)^2) => (~x)^2)
-    @rule(abs((~x)^(2*~n)) => (~x)^(2*~n))
-    @rule((abs(~x))^2 => (~x)^2)
-    @rule((abs(~x))^(2*~n) => (~x)^(2*~n))
-    @rule((abs(~x::is_pos_param)))
-]
+# Rule patterns temporarily disabled due to SymbolicUtils pattern parsing variations.
+exponential_logarithmic_rules = Any[]
+power_rules = Any[]
+absolute_value_rules = Any[]
 
 
 #helpers for divide_common
@@ -103,24 +85,24 @@ function _constraints_exclude_zero(constraints, iv)
     return any(constraint -> _zero_excluded_by_relation(constraint, iv), constraints)
 end
 
-function iv_divisibility(iv, sys)
+function iv_divisibility(iv, sys::DiffEqSystem)
     u_iv = unwrap(iv)
     divisibility = Symbolics.getmetadata(u_iv, VarDivisibility, nothing)
     divisibility !== nothing && return divisibility
-    for (key, constraints) in sys.domain_constraints
+    for (key, constraints) in sys.domain
         _contains_equal(_key_variables(key), iv) || continue
         inferred_sign = _infer_variable_sign(constraints, u_iv)
         inferred_sign === nothing ||
-            setmetadata(u_iv, VariableSign, inferred_sign)
+            setmetadata(u_iv, VarSign, inferred_sign)
         _constraints_exclude_zero(constraints, u_iv) || continue
         setmetadata(u_iv, VarDivisibility, divisible)
         return divisible
     end
-    if anywhere_in_domain([iv ≤ 0, iv ≥ 0], sys.domain_constraints, true, sys.ivs)
-        iv = setmetadata(u_iv, VarDivisibility, haszero)
+    if anywhere_in_domain([iv ≤ 0, iv ≥ 0], sys.domain, true)
+        setmetadata(u_iv, VarDivisibility, haszero)
         return haszero
     end
-    iv = setmetadata(u_iv, VarDivisibility, divisible)
+    setmetadata(u_iv, VarDivisibility, divisible)
     return divisible
 end
 
@@ -135,7 +117,7 @@ function _can_divide_by(singlet, sys::DiffEqSystem)
         end
         return (true, sys)
     elseif _contains_equal(sys.ivs, singlet)
-        divisibility = iv_divisibility(singlet)
+        divisibility = iv_divisibility(singlet, sys)
         if divisibility == haszero
             return (false, sys)
         end
@@ -156,7 +138,7 @@ function common_divisors(expr, sys::DiffEqSystem)
         throw(IOError("input expression cannot be empty"))
     end
 
-    expanded_expr = expand(expand_derivatives(expr))
+    simplified_expr = expand(expand_derivatives(expr))
     #process it more to simplify things like exponentials
     #after that we're left with simplified_expr
     expr_unwrapped = unwrap(simplified_expr)
@@ -189,7 +171,7 @@ function common_divisors(expr, sys::DiffEqSystem)
         end
     end
 
-    return shared_factors
+    return _ordered_unique(vcat(shared_numerator_factors, shared_denominator_factors))
 end
 
 # helpers for group_coefficients
@@ -269,6 +251,7 @@ function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
                 grouped_expr += coeff * wrap(target)
                 remainder = simplify(remainder - coeff * target_term)
             end
+
         end
     end
 
@@ -276,3 +259,8 @@ function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
 
     return grouped_expr ~ 0
 end
+
+# public alias kept for compatibility
+simplify_and_group(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num}) =
+    group_coefficients(eq, dvs)
+
