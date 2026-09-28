@@ -167,19 +167,105 @@ function shrink_bounds!(bounds, constraint)
         return bounds
     end
     var=vars[1]
-    expr = simplify(constraint.lhs-constraint.rhs)
-    if !(Symbolics.degree(expr, var)==1)
+    relation = Symbolics.unwrap(constraint)
+    lhs, rhs = SymbolicUtils.arguments(relation)
+    expr = simplify(lhs - rhs)
+    if !isequal(Symbolics.degree(expr, var), 1)
         return bounds
     end
-    op = Symbolics.operation(constraint)
+    op = Symbolics.operation(relation)
     coeff = Symbolics.coeff(expr, var)
-    num = substitute(expr, var => 0)/coeff
-    if (((op === <) || (op === ≤)) && (coeff > 0)) || (((op === >) || (op === ≥))&&(coeff < 0))
+    coeff_value = SymbolicUtils.unwrap_const(Symbolics.unwrap(coeff))
+    coeff_value isa Real || return bounds
+    num = SymbolicUtils.unwrap_const(Symbolics.unwrap(substitute(expr, var => 0) / coeff))
+    num isa Real || return bounds
+    if (((op === <) || (op === ≤)) && (coeff_value > 0)) ||
+       (((op === >) || (op === ≥)) && (coeff_value < 0))
         bounds[var][2] = min(-num, bounds[var][2])
-    elseif (((op === <) || (op === ≤)) && (coeff < 0)) || (((op === >) || (op === ≥))&&(coeff > 0))
+    elseif (((op === <) || (op === ≤)) && (coeff_value < 0)) ||
+           (((op === >) || (op === ≥)) && (coeff_value > 0))
         bounds[var][1] = max(-num, bounds[var][1])
     end
     return bounds
+end
+
+function _domain_interval_value(expr, variables, box)
+    unwrapped = Symbolics.unwrap(expr)
+    literal = SymbolicUtils.unwrap_const(unwrapped)
+    literal isa Real && return bareinterval(literal)
+    for (index, variable) in pairs(variables)
+        isequal(unwrapped, Symbolics.unwrap(variable)) &&
+            return box[index]
+    end
+    SymbolicUtils.istree(unwrapped) || return interval(-Inf, Inf)
+    op = SymbolicUtils.operation(unwrapped)
+    args = SymbolicUtils.arguments(unwrapped)
+    values = [_domain_interval_value(arg, variables, box) for arg in args]
+    if op === (+)
+        return sum(values)
+    elseif op === (-)
+        return length(values) == 1 ? -values[1] : values[1] - values[2]
+    elseif op === (*)
+        return prod(values)
+    elseif op === (/)
+        return values[1] / values[2]
+    elseif op === (^)
+        return values[1] ^ values[2]
+    elseif op === abs
+        return abs(values[1])
+    elseif op === exp
+        return exp(values[1])
+    elseif op === log
+        return log(values[1])
+    elseif op === sin
+        return sin(values[1])
+    elseif op === cos
+        return cos(values[1])
+    end
+    return interval(-Inf, Inf)
+end
+
+function _domain_relation_status(constraint, variables, box)
+    relation = Symbolics.unwrap(constraint)
+    op = Symbolics.operation(relation)
+    op in ((<), (≤), (>), (≥), (==), (!=)) || return :unknown
+    lhs, rhs = SymbolicUtils.arguments(relation)
+    value = _domain_interval_value(lhs - rhs, variables, box)
+    lower, upper = inf(value), sup(value)
+    if op === (<)
+        return upper < 0 ? :inside : lower >= 0 ? :outside : :unknown
+    elseif op === (≤)
+        return upper <= 0 ? :inside : lower > 0 ? :outside : :unknown
+    elseif op === (>)
+        return lower > 0 ? :inside : upper <= 0 ? :outside : :unknown
+    elseif op === (≥)
+        return lower >= 0 ? :inside : upper < 0 ? :outside : :unknown
+    elseif op === (==)
+        return lower == 0 && upper == 0 ? :inside :
+               (upper < 0 || lower > 0) ? :outside : :unknown
+    end
+    return (upper < 0 || lower > 0) ? :inside :
+           (lower == 0 && upper == 0) ? :outside : :unknown
+end
+
+function _pave_constraints(box, constraints, variables, epsilon)
+    working = [box]
+    inner = typeof(box)[]
+    boundary = typeof(box)[]
+    while !isempty(working)
+        current = pop!(working)
+        isempty(current) && continue
+        statuses = [_domain_relation_status(c, variables, current) for c in constraints]
+        any(isequal(:outside), statuses) && continue
+        if all(isequal(:inside), statuses)
+            push!(inner, current)
+        elseif diam(current) < epsilon
+            push!(boundary, current)
+        else
+            append!(working, bisect(current))
+        end
+    end
+    return inner, boundary
 end
 
 function constraints_to_domain(domain_pairs)
@@ -187,19 +273,20 @@ function constraints_to_domain(domain_pairs)
     isempty(domain_pairs) && return nothing
     all_vars = _domain_variables(domain_pairs)
     bounds = Dict{Any,Vector{Float64}}(v => [-ROI[], ROI[]] for v in all_vars)
-    C = nothing
-    for (_, constraints) in domain_pairs, c in constraints
+    collected_constraints = Any[]
+    for (_, group_constraints) in domain_pairs, c in group_constraints
         u_c = Symbolics.unwrap(c)
         constraint_vars = Symbolics.get_variables(u_c)
         all(v -> haskey(bounds, v), constraint_vars) ||
             throw(ArgumentError("domain constraints reference variables absent from their domain keys"))
-        new_C = ICP.constraint(u_c, all_vars)
-        C = C === nothing ? new_C : C ∩ new_C
+        push!(collected_constraints, u_c)
         shrink_bounds!(bounds, c)
     end
+    any(bounds[v][1] > bounds[v][2] for v in all_vars) &&
+        return (IntervalBox[], IntervalBox[])
     intervals = [bareinterval(bounds[v][1], bounds[v][2]) for v in all_vars]
     box = IntervalBox(intervals...)
-    C === nothing ? ([box], IntervalBox[]) : ICP.pave(C, box, tolerance[])
+    return _pave_constraints(box, collected_constraints, all_vars, tolerance[])
 end
 
 function constraints_to_domain(sys::DiffEqSystem)
@@ -228,7 +315,14 @@ function is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractV
     any(coord ∈ box for box in boxes)
 end
 
-function anywhere_in_domain(
+"""
+    constraints_satisfiable(constraints, domain_constraints, include_boundary=true)
+
+Check whether `constraints` have a feasible point in the supplied domain
+component. The component should contain every variable referenced by the new
+constraints; unrelated Cartesian factors should be omitted.
+"""
+function constraints_satisfiable(
     constraints,
     domain_constraints,
     include_boundary::Bool=true,
