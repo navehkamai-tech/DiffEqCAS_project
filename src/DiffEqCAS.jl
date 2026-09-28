@@ -8,9 +8,9 @@ in addition my aim is to have leave the possibility of numeric computation open 
 =#
 
 using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unitful, IntervalArithmetic, IntervalBoxes, StaticArrays
-import IntervalConstraintProgramming as ICP
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute
 import SymbolicUtils: maketerm, @rule, @acrule
+
 export SymbolicDomain, domain_variables, domain_components, DiffEqSystem, change_dvs, change_ivs, change_parameters, group_coefficients, custom_rewrite, get_base_op, get_sign, Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 
 # 1. Foundational helpers

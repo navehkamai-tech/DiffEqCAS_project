@@ -25,11 +25,99 @@ absolute_value_rules = [
 
 #helpers for divide_common
 function _bound_sign(expr)
+    literal = SymbolicUtils.unwrap_const(Symbolics.unwrap(expr))
+    literal isa Real && return (
+        sign=literal > 0 ? positive : literal < 0 ? negative : undetermined,
+        iszero=isequal(literal, 0),
+    )
+    known_sign = get_sign(expr)
+    known_sign !== undetermined && return (sign=known_sign, iszero=false)
     simplified = simplify(expr)
     literal = SymbolicUtils.unwrap_const(Symbolics.unwrap(simplified))
-    literal isa Real || return (sign=get_sign(simplified), iszero=false)
-    sign = literal > 0 ? positive : literal < 0 ? negative : undetermined
-    return (sign=sign, iszero=isequal(literal, 0))
+    literal isa Real && return (
+        sign=literal > 0 ? positive : literal < 0 ? negative : undetermined,
+        iszero=isequal(literal, 0),
+    )
+
+    # Keep this deliberately conservative: proving every term has the same
+    # sign is useful for parameter-dependent bounds without guessing unknowns.
+    if SymbolicUtils.istree(simplified)
+        op = SymbolicUtils.operation(simplified)
+        args = SymbolicUtils.arguments(simplified)
+        if op === (+)
+            signs = _bound_sign.(args)
+            if all(value -> value.sign === positive, signs)
+                return (sign=positive, iszero=false)
+            elseif all(value -> value.sign === negative, signs)
+                return (sign=negative, iszero=false)
+            elseif all(value -> value.iszero, signs)
+                return (sign=undetermined, iszero=true)
+            end
+        elseif op === (-) && length(args) == 1
+            value = _bound_sign(args[1])
+            return (sign=value.sign === positive ? negative :
+                         value.sign === negative ? positive : undetermined,
+                    iszero=value.iszero)
+        elseif op === (*)
+            signs = _bound_sign.(args)
+            any(value -> value.iszero, signs) &&
+                return (sign=undetermined, iszero=true)
+            nonzero = all(value -> value.sign in (positive, negative), signs)
+            if nonzero
+                negative_factors = count(value -> value.sign === negative, signs)
+                return (sign=isodd(negative_factors) ? negative : positive,
+                        iszero=false)
+            end
+        elseif op === (/) && length(args) == 2
+            numerator, denominator = _bound_sign.(args)
+            if denominator.sign in (positive, negative) && numerator.sign in (positive, negative)
+                sign = numerator.sign === denominator.sign ? positive : negative
+                return (sign=sign, iszero=false)
+            elseif numerator.iszero && denominator.sign in (positive, negative)
+                return (sign=undetermined, iszero=true)
+            end
+        end
+    end
+
+    return (sign=get_sign(simplified), iszero=false)
+end
+
+function _affine_coefficients(expr, iv)
+    isequal(expr, iv) && return (one(expr), zero(expr))
+    _contains_equal(Symbolics.get_variables(expr), iv) || return (zero(expr), expr)
+    SymbolicUtils.istree(expr) || return nothing
+    op = SymbolicUtils.operation(expr)
+    args = SymbolicUtils.arguments(expr)
+    if op === (+)
+        parts = [_affine_coefficients(arg, iv) for arg in args]
+        any(isnothing, parts) && return nothing
+        return (sum(part[1] for part in parts), sum(part[2] for part in parts))
+    elseif op === (-)
+        if length(args) == 1
+            part = _affine_coefficients(args[1], iv)
+            isnothing(part) && return nothing
+            return (-part[1], -part[2])
+        end
+        length(args) == 2 || return nothing
+        lhs, rhs = _affine_coefficients.(args, Ref(iv))
+        (isnothing(lhs) || isnothing(rhs)) && return nothing
+        return (lhs[1] - rhs[1], lhs[2] - rhs[2])
+    elseif op === (*)
+        parts = [_affine_coefficients(arg, iv) for arg in args]
+        any(isnothing, parts) && return nothing
+        variable_parts = filter(part -> !isequal(part[1], 0), parts)
+        length(variable_parts) > 1 && return nothing
+        constant = prod(part[2] for part in parts if isequal(part[1], 0))
+        isempty(variable_parts) && return (zero(expr), constant)
+        variable = only(variable_parts)
+        return (variable[1] * constant, variable[2] * constant)
+    elseif op === (/)
+        length(args) == 2 || return nothing
+        lhs, rhs = _affine_coefficients.(args, Ref(iv))
+        (isnothing(lhs) || isnothing(rhs)) && return nothing
+        rhs[1] == 0 && return (lhs[1] / rhs[2], lhs[2] / rhs[2])
+    end
+    return nothing
 end
 
 function _reverse_relation(op)
@@ -52,6 +140,8 @@ function _sign_from_bound(op, bound_sign, bound_iszero)
 end
 
 function _relation_operands(constraint, iv)
+    # Canonicalize simple affine relations locally instead of rewriting the
+    # domain, so callers retain the constraints they supplied.
     relation = Symbolics.unwrap(constraint)
     op = Symbolics.operation(relation)
     op in ((<), (≤), (>), (≥)) || return nothing
@@ -62,12 +152,28 @@ end
 
 function _relation_sign(constraint, iv)
     operands = _relation_operands(constraint, iv)
-    operands === nothing && return undetermined
-    lhs, rhs, op = operands
-    isequal(lhs, iv) || return undetermined
-    _contains_equal(Symbolics.get_variables(rhs), iv) && return undetermined
-    bound = _bound_sign(rhs)
-    return _sign_from_bound(op, bound.sign, bound.iszero)
+    if operands !== nothing
+        lhs, rhs, op = operands
+        if isequal(lhs, iv) && !_contains_equal(Symbolics.get_variables(rhs), iv)
+            bound = _bound_sign(rhs)
+            return _sign_from_bound(op, bound.sign, bound.iszero)
+        end
+    end
+
+    relation = Symbolics.unwrap(constraint)
+    op = Symbolics.operation(relation)
+    op in ((<), (≤), (>), (≥)) || return undetermined
+    lhs, rhs = SymbolicUtils.arguments(relation)
+    affine = _affine_coefficients(lhs - rhs, iv)
+    affine === nothing && return undetermined
+    coefficient, intercept = affine
+    isequal(coefficient, 0) && return undetermined
+    coefficient_sign = _bound_sign(coefficient).sign
+    coefficient_sign in (positive, negative) || return undetermined
+
+    bound = _bound_sign(-intercept / coefficient)
+    relation_op = coefficient_sign === positive ? op : _reverse_relation(op)
+    return _sign_from_bound(relation_op, bound.sign, bound.iszero)
 end
 
 function _combined_constraint_sign(found_positive, found_negative)
@@ -82,7 +188,34 @@ function _zero_excluded_by_relation(constraint, iv)
     op = Symbolics.operation(u_constraint)
     op in ((<), (≤), (>), (≥), (==), (!=)) || return false
     zero_constraint = simplify(substitute(u_constraint, iv => 0))
-    return isequal(SymbolicUtils.unwrap_const(Symbolics.unwrap(zero_constraint)), false)
+    isequal(SymbolicUtils.unwrap_const(Symbolics.unwrap(zero_constraint)), false) &&
+        return true
+
+    # A positive power of the independent variable is zero at the origin.
+    # Handle symbolic positive exponents when substitution cannot evaluate
+    # `0^n` directly, while leaving unknown or nonpositive exponents alone.
+    op in ((<), (≤), (>), (≥)) || return false
+    lhs, rhs = SymbolicUtils.arguments(u_constraint)
+    power = nothing
+    other = nothing
+    for (candidate, remainder) in ((lhs, rhs), (rhs, lhs))
+        if SymbolicUtils.istree(candidate) &&
+           SymbolicUtils.operation(candidate) === (^)
+            base, exponent = SymbolicUtils.arguments(candidate)
+            if isequal(base, iv)
+                power = (candidate, exponent)
+                other = remainder
+                break
+            end
+        end
+    end
+    power === nothing && return false
+    isequal(SymbolicUtils.unwrap_const(Symbolics.unwrap(other)), 0) || return false
+    _, exponent = power
+    exponent_sign = _bound_sign(exponent).sign
+    exponent_sign === positive || return false
+    op in ((<), (>)) || return false
+    return true
 end
 
 function _infer_variable_sign(constraints, iv)
@@ -99,7 +232,10 @@ function _infer_variable_sign(constraints, iv)
 end
 
 function _constraints_exclude_zero(constraints, iv)
-    return any(constraint -> _zero_excluded_by_relation(constraint, iv), constraints)
+    return any(constraints) do constraint
+        _relation_sign(constraint, iv) in (positive, negative) ||
+            _zero_excluded_by_relation(constraint, iv)
+    end
 end
 
 function iv_divisibility(iv, sys::DiffEqSystem)
@@ -111,13 +247,17 @@ function iv_divisibility(iv, sys::DiffEqSystem)
         inferred_sign = _infer_variable_sign(constraints, u_iv)
         inferred_sign === nothing ||
             setmetadata(u_iv, VarSign, inferred_sign)
-        _constraints_exclude_zero(constraints, u_iv) || continue
+        if _constraints_exclude_zero(constraints, u_iv)
+            setmetadata(u_iv, VarDivisibility, divisible)
+            return divisible
+        end
+        component = [key => constraints]
+        if constraints_satisfiable([iv ≤ 0, iv ≥ 0], component, true)
+            setmetadata(u_iv, VarDivisibility, haszero)
+            return haszero
+        end
         setmetadata(u_iv, VarDivisibility, divisible)
         return divisible
-    end
-    if anywhere_in_domain([iv ≤ 0, iv ≥ 0], sys.domain, true)
-        setmetadata(u_iv, VarDivisibility, haszero)
-        return haszero
     end
     setmetadata(u_iv, VarDivisibility, divisible)
     return divisible
@@ -276,4 +416,3 @@ function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
 
     return grouped_expr ~ 0
 end
-
