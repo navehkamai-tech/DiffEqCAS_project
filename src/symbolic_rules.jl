@@ -13,12 +13,7 @@
 @register_symbolic Heaviside(x::AbstractVector)
 @register_symbolic Heaviside(x::Symbolics.Num)
 @register_symbolic Heaviside(x::Symbolics.Arr)
-# 1. Define the helper functions as standard or anonymous functions
-notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
-is_pos_param(var) = notavariable(var) && get_sign(var) == positive
-is_neg_param(var) = notavariable(var) && get_sign(var) == negative
-is_number(x) = x isa Number
-is_domain(x) = x isa DomainSets.Domain
+
 
 function is_array_literal(x)
     return SymbolicUtils.istree(x) && SymbolicUtils.operation(x) === SymbolicUtils.array_literal

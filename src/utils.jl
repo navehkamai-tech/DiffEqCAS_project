@@ -58,7 +58,7 @@ function chain_rule(J_inv, old_var_idx, new_vars, arg, order=1)
     return unwrap(term)
 end
 
-function has_depvar_or_diff(expr)
+function _has_depvar_or_diff(expr)
     # get_variables extracts [x, f(x), D(f(x))] and ignores standard math wrappers like sin()
     vars = Symbolics.get_variables(expr)
 
@@ -120,3 +120,13 @@ end
 function expand_derivatives!(expr)
     return Symbolics.expand_derivatives(expr)
 end
+
+#symbolic rule util functions
+notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
+is_pos_param(var) = notavariable(var) && get_sign(var) == positive
+is_neg_param(var) = notavariable(var) && get_sign(var) == negative
+is_number(x) = x isa Number
+is_real(x) = x isa Real
+is_complex(x) = x isa Number && !(x isa Real)
+is_positive(x) = get_sign(x)==positive
+is_negative(x) = get_sign(x)==negative

@@ -1,27 +1,67 @@
 #rules for stuff simplify doesn't handle well
-#need to add domain checks
+#symbolic rule util functions
+notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
+is_pos_param(var) = notavariable(var) && get_sign(var) == positive
+is_neg_param(var) = notavariable(var) && get_sign(var) == negative
+is_number(x) = x isa Number
+is_real(x) = x isa Real
+is_complex(x) = x isa Number && !(x isa Real)
+is_positive(x) = get_sign(x)==positive
+is_negative(x) = get_sign(x)==negative
+is_divisible(x) = nothing #? needs to be filled in
+is_integer(x) = x isa Integer
+
+@variables π e #what else?...
+
 exponential_logarithmic_rules = [
-    @rule(exp(~x)/exp(~y) => exp(~x - ~y)),
-    @rule(exp(log(~x)) => ~x),
-    @rule(log(exp(~x)) => ~x),
+    @rule(~x/exp(~y) => ~x*exp(-~y)),
+    @rule(exp(~x)^~n => exp(~x*~n)),
+    @rule(exp(log(~x::is_positive)) => ~x),
+    @rule(log(exp(~x::is_real)) => ~x),
     @rule(log(~x)+log(~y) => log(~x * ~y)),
     @rule(log(~x)-log(~y) => log(~x/~y)),
     @rule(~n*log(~x) => log(~x^~n)),
 ]
 power_rules = [
-    @rule((~x)^(~z)/(~x)^(~y) => (~x)^(~z-~y)),
-    @rule(((~x)^(~y))^(~z) => (~x)^(~y*~z)),
-    @rule(sqrt((~x)^2) => abs(~x)),
+    @rule(~z/(~x::is_divisible)^(~y) => ~z*~x^(-~y)),
+    @rule(((~x::is_positive)^(~y))^(~z) => (~x)^(~y*~z)),
+    @rule(sqrt((~x::is_real)^2) => abs(~x)),
 ]
 absolute_value_rules = [
     @rule(abs(~x*~y) => abs(~x)*abs(~y)),
-    @rule(abs((~x)^2) => (~x)^2),
-    @rule(abs((~x)^(2*~n)) => (~x)^(2*~n)),
+    @rule(abs((~x::is_real)^2) => (~x)^2),
+    @rule(abs((~x::is_real)^(2*~n)) => (~x)^(2*~n)),
     @rule((abs(~x))^2 => (~x)^2),
     @rule((abs(~x)^(2*~n)) => (~x)^(2*~n)),
-    @rule(abs(~x::is_pos_param) => ~x),
+    @rule(abs(~x::is_positive) => ~x),
+    @rule(abs(~x::is_negative) => -~x),
 ]
+trigonometric_rules = [
+    @rule(sin(~x+2*π) => sin(~x)),
+    @rule(sin(~x+2*π*~n::is_integer) => sin(~x)),
+    @rule(cos(~x+2*π) => cos(~x)),
+    @rule(cos(~x+2*π*~n::is_integer) => cos(~x)),
+    @rule(sin(~x)^2 => 1//2-1//2*cos(2*~x)),
+    @rule(cos(~x)^2 => 1//2+1//2*cos(2*~x)),
+    @rule(tan(~x) => sin(~x)/cos(~x))
 
+    #what more? i need addition to multiplication or the inverse, but which?
+    #in general there are so many trig identities, it's difficult to know which direction is best for them
+]
+# add hyperbolic trig rules if wanted
+
+#it's vital to normalize the arguments of these kinds of functions - otherwise they can fail to simplify properly
+#these being exp, log, trigonometric functions
+#copilot recommends applying simplify directly to the argument
+
+#is_positive needs to be upgraded to handle arbitrary expressions and possibly complex number inputs (return false if complex of course)
+
+#need to define constants like π as symbolics so that they do not become floating points
+#it might become necessary to move the simplifier rules into the rewriter generating function
+
+#would be good to treat differentials as operators so they can be factored as polynomials. don't know how I would do that
+
+#I also need to handle limits, not just integrals, for my boundary conditions.
 
 #helpers for divide_common
 function _bound_sign(expr)
@@ -260,7 +300,7 @@ function _divisibility_components(sys::DiffEqSystem, factor)
     factor_variables = Set(Symbolics.get_variables(Symbolics.unwrap(factor)))
     return [
         (key, constraints) for (key, constraints) in sys.domain
-        if !isempty(intersect(factor_variables, Set(_key_variables(key))))
+                               if !isempty(intersect(factor_variables, Set(_key_variables(key))))
     ]
 end
 
@@ -286,7 +326,7 @@ function _exact_factor_divisibility(factor, sys::DiffEqSystem)
     simplified_value = SymbolicUtils.unwrap_const(Symbolics.unwrap(simplified))
     simplified_value isa Number &&
         return _proven(simplified_value == 0 ? haszero : divisible,
-                       :exact_simplification, simplified_value)
+            :exact_simplification, simplified_value)
 
     return nothing
 end
