@@ -180,10 +180,10 @@ function shrink_bounds!(bounds, constraint)
     num = SymbolicUtils.unwrap_const(Symbolics.unwrap(substitute(expr, var => 0) / coeff))
     num isa Real || return bounds
     if (((op === <) || (op === ≤)) && (coeff_value > 0)) ||
-       (((op === >) || (op === ≥)) && (coeff_value < 0))
+        (((op === >) || (op === ≥)) && (coeff_value < 0))
         bounds[var][2] = min(-num, bounds[var][2])
     elseif (((op === <) || (op === ≤)) && (coeff_value < 0)) ||
-           (((op === >) || (op === ≥)) && (coeff_value > 0))
+        (((op === >) || (op === ≥)) && (coeff_value > 0))
         bounds[var][1] = max(-num, bounds[var][1])
     end
     return bounds
@@ -289,9 +289,9 @@ function constraints_to_domain(domain_pairs)
     return _pave_constraints(box, collected_constraints, all_vars, tolerance[])
 end
 
-function constraints_to_domain(sys::DiffEqSystem)
+function add_domain_paving(sys::DiffEqSystem)
     sys.domain_set === nothing && (sys.domain_set = constraints_to_domain(sys.domain))
-    sys.domain_set
+    return sys.domain_set
 end
 
 function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqSystem, include_boundary::Bool=true)
@@ -300,19 +300,19 @@ function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqSystem, include_bo
     length(coord) == length(_domain_variables(sys.domain)) ||
         throw(DimensionMismatch("coords must have the same dimension as domain"))
     domain, boundary = domain_data
+    domain_data === nothing && return false
     boxes = include_boundary ? (domain..., boundary...) : domain
-    any(coord ∈ box for box in boxes)
+    return any(coord ∈ box for box in boxes)
 end
 
-function is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector,
-    include_boundary::Bool=true)
+function is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector, include_boundary::Bool=true)
     length(coord) == length(_domain_variables(domain_constraints)) ||
         throw(DimensionMismatch("coords must have the same dimension as domain"))
     domain_data = constraints_to_domain(domain_constraints)
     domain_data === nothing && return false
     domain, boundary = domain_data
     boxes = include_boundary ? (domain..., boundary...) : domain
-    any(coord ∈ box for box in boxes)
+    return any(coord ∈ box for box in boxes)
 end
 
 """

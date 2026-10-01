@@ -1,3 +1,10 @@
+#=
+goals: 
+1) have a stack of the current systems being processed. certain processes will output multiple systems rather than one, so a stack is needed to manage it
+2) have a LRUCache for global caching. create the function that gives a value to each thing cached
+3) add a field to the DiffEqSystem struct for it's history. update functions to append the current process to the outputted system's history
+=#
+
 struct SymbolicDomain
     pairs::Vector{Pair}
     variables::Vector{Any}
@@ -46,8 +53,6 @@ mutable struct DiffEqSystem{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector
     eqs::E
     bcs::B
     domain::SymbolicDomain
-    domain_set::Union{Nothing,Tuple{<:AbstractVector{<:IntervalBoxes.IntervalBox},<:AbstractVector{<:IntervalBoxes.IntervalBox}}}
-    trivial_sols::T
 end
 
 function Base.setproperty!(sys::DiffEqSystem, name::Symbol, value)
@@ -77,6 +82,12 @@ function DiffEqSystem(; eqs, ivs, dvs, ps=Symbolics.Num[], bcs=Symbolics.Equatio
     DiffEqSystem(eqs, bcs, domain, ivs, dvs; ps=ps, name=name,
         domain_set=domain_set, trivial_solutions=trivial_solutions)
 end
+
+working_systems = Stack{DiffEqSystem}()
+
+const cache_size = Ref{Int64}(100)
+
+global cache = LRU{Any,Any}(maxsize=cache_size)
 
 @enum SignState positive negative either undetermined
 struct VarSign end

@@ -57,7 +57,7 @@ function _bound_sign(expr)
             value = _bound_sign(args[1])
             return (sign=value.sign === positive ? negative :
                          value.sign === negative ? positive : undetermined,
-                    iszero=value.iszero)
+                iszero=value.iszero)
         elseif op === (*)
             signs = _bound_sign.(args)
             any(value -> value.iszero, signs) &&
@@ -66,7 +66,7 @@ function _bound_sign(expr)
             if nonzero
                 negative_factors = count(value -> value.sign === negative, signs)
                 return (sign=isodd(negative_factors) ? negative : positive,
-                        iszero=false)
+                    iszero=false)
             end
         elseif op === (/) && length(args) == 2
             numerator, denominator = _bound_sign.(args)
@@ -200,7 +200,7 @@ function _zero_excluded_by_relation(constraint, iv)
     other = nothing
     for (candidate, remainder) in ((lhs, rhs), (rhs, lhs))
         if SymbolicUtils.istree(candidate) &&
-           SymbolicUtils.operation(candidate) === (^)
+            SymbolicUtils.operation(candidate) === (^)
             base, exponent = SymbolicUtils.arguments(candidate)
             if isequal(base, iv)
                 power = (candidate, exponent)
@@ -238,56 +238,32 @@ function _constraints_exclude_zero(constraints, iv)
     end
 end
 
-function iv_divisibility(iv, sys::DiffEqSystem)
-    u_iv = unwrap(iv)
-    divisibility = Symbolics.getmetadata(u_iv, VarDivisibility, nothing)
-    divisibility !== nothing && return divisibility
-    for (key, constraints) in sys.domain
-        _contains_equal(_key_variables(key), iv) || continue
-        inferred_sign = _infer_variable_sign(constraints, u_iv)
-        inferred_sign === nothing ||
-            setmetadata(u_iv, VarSign, inferred_sign)
-        if _constraints_exclude_zero(constraints, u_iv)
-            setmetadata(u_iv, VarDivisibility, divisible)
-            return divisible
+function singlet_divisibility(singlet, sys::DiffEqSystem)
+    if singlet isa Number
+        if singlet != 0
+            return true
         end
-        component = [key => constraints]
-        if constraints_satisfiable([iv ≤ 0, iv ≥ 0], component, true)
-            setmetadata(u_iv, VarDivisibility, haszero)
-            return haszero
-        end
-        setmetadata(u_iv, VarDivisibility, divisible)
-        return divisible
+        return false
+    elseif _contains_equal(sys.ps, singlet)
+        return true
+    elseif _contains_equal(sys.ivs, singlet)
+        return ivs_polynomial_divisibility(singlet, sys)
     end
-    setmetadata(u_iv, VarDivisibility, divisible)
-    return divisible
+    return false
 end
 
-function _can_divide_by(singlet, sys::DiffEqSystem)
-    if SymbolicUtils.istree(singlet) && !_contains_equal(sys.dvs, singlet)
-        return (false, sys)
+function _can_divide_by(expr::Symbolics.Num, sys::DiffEqSystem)
+    expr_u = unwrap(expr)
+    if !SymbolicUtils.istree(expr_u)
+        return singlet_divisibility(expr_u)
+    elseif _has_depvar_or_diff(expr)
+        return false
     end
-    if singlet isa Number
-        if singlet == 0
-            #terms with 0 should be automatically removed with Symbolics.simplify. this is to catch if somehow that didn't happen
-            throw(DivideError("tried to divide by zero, system bug"))
-        end
-        return (true, sys)
-    elseif _contains_equal(sys.ivs, singlet)
-        divisibility = iv_divisibility(singlet, sys)
-        if divisibility == haszero
-            return (false, sys)
-        end
-        return (true, sys)
-    elseif _contains_equal(sys.ps, singlet)
-        return (true, sys)
-    elseif SymbolicUtils.istree(singlet) && _contains_equal(sys.dvs, SymbolicUtils.operation(singlet))
-        new_solution = singlet ~ 0
-        _push_unique(sys.trivial_sols, new_solution)
-        return (true, sys)
-    end
+
+
+
     # handles things like derivatives of dvs, since their operator is Differential
-    return (false, sys)
+    return false, sys
 end
 
 function common_divisors(expr, sys::DiffEqSystem)

@@ -2,7 +2,7 @@
 
 julia_version = "1.13.0"
 manifest_format = "2.1"
-project_hash = "7c3076cb217c563ead39c2b00642dfb61f4a90a6"
+project_hash = "f75cd49772cb212f8dce7938908fd1c664d7de90"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -498,7 +498,7 @@ version = "7.21.2"
     Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [[deps.DiffEqCAS]]
-deps = ["AbstractTrees", "BenchmarkTools", "Debugger", "DomainSets", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LaTeXStrings", "Latexify", "LinearAlgebra", "ModelingToolkit", "Nemo", "Pluto", "PlutoUI", "Revise", "SpecialFunctions", "StaticArrays", "SymbolicUtils", "Symbolics", "Unitful"]
+deps = ["AbstractTrees", "BenchmarkTools", "DataStructures", "Debugger", "DomainSets", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LRUCache", "LaTeXStrings", "Latexify", "LinearAlgebra", "Memoize", "ModelingToolkit", "Nemo", "Pluto", "PlutoUI", "Revise", "SpecialFunctions", "StaticArrays", "SymbolicUtils", "Symbolics", "Unitful"]
 path = "."
 uuid = "2bd819c4-9fc0-462e-83be-792a2297597c"
 version = "0.1.0"
@@ -1475,6 +1475,13 @@ git-tree-sha1 = "ff69a2b1330bcb730b9ac1ab7dd680176f5896b8"
 registries = "General"
 uuid = "c8ffd9c3-330d-5841-b78e-0817d7145fa1"
 version = "2.28.1010+0"
+
+[[deps.Memoize]]
+deps = ["MacroTools"]
+git-tree-sha1 = "2b1dfcba103de714d31c033b5dacc2e4a12c7caa"
+registries = "General"
+uuid = "c03570c3-d221-55d1-a50c-7939bbd78826"
+version = "0.4.4"
 
 [[deps.Missings]]
 deps = ["DataAPI"]

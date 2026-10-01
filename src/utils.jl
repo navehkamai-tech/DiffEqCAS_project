@@ -58,6 +58,21 @@ function chain_rule(J_inv, old_var_idx, new_vars, arg, order=1)
     return unwrap(term)
 end
 
+function has_depvar_or_diff(expr)
+    # get_variables extracts [x, f(x), D(f(x))] and ignores standard math wrappers like sin()
+    vars = Symbolics.get_variables(expr)
+
+    for v in vars
+        v_un = Symbolics.unwrap(v)
+        if SymbolicUtils.istree(v_un)
+            op = SymbolicUtils.operation(v_un)
+            if op isa Differential || op isa SymbolicUtils.Sym
+                return true
+            end
+        end
+    end
+    return false
+end
 #parameter helper
 function extract_parameters(list::Tuple)
     symbols = Symbolics.Num[]
