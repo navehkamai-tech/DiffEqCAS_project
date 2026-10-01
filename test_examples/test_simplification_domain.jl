@@ -28,4 +28,4 @@ positive_n = Symbolics.setmetadata(n, DiffEqCAS.VarSign, DiffEqCAS.positive)
 @test DiffEqCAS._constraints_exclude_zero([x^positive_n > 0], x)
 
 system = DiffEqSystem([], [], [x => [2x > 0]], [x], [])
-@test DiffEqCAS.iv_divisibility(x, system) === DiffEqCAS.divisible
+@test DiffEqCAS.factor_divisibility(x, system).status === DiffEqCAS.divisible

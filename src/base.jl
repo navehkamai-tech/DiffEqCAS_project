@@ -53,6 +53,8 @@ mutable struct DiffEqSystem{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector
     eqs::E
     bcs::B
     domain::SymbolicDomain
+    domain_set::Union{Nothing,Tuple{<:AbstractVector{<:IntervalBoxes.IntervalBox},<:AbstractVector{<:IntervalBoxes.IntervalBox}}}
+    trivial_sols::T
 end
 
 function Base.setproperty!(sys::DiffEqSystem, name::Symbol, value)
@@ -87,7 +89,7 @@ working_systems = Stack{DiffEqSystem}()
 
 const cache_size = Ref{Int64}(100)
 
-global cache = LRU{Any,Any}(maxsize=cache_size)
+global cache = LRU{Any,Any}(maxsize=cache_size[])
 
 @enum SignState positive negative either undetermined
 struct VarSign end
@@ -100,11 +102,3 @@ function get_sign(var)
 end
 
 @enum DivisState divisible haszero undetermined
-struct VarDivisibility end
-Symbolics.option_to_metadata_type(::Val{:divisible}) = VarDivisibility
-
-function get_divisibility(var)
-    value = unwrap(var)
-    value isa Real && return value == 0 ? haszero : divisible
-    Symbolics.getmetadata(value, VarDivisibility, undetermined)
-end

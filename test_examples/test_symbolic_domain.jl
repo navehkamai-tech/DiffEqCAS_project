@@ -36,4 +36,4 @@ sys.domain = SymbolicDomain([x => [x > 0]])
 @variables x2 y2 z2
 component_system = DiffEqSystem(
     [], [], [x2 => [], (y2, z2) => [y2 > 2, y2 < 1]], [x2, y2, z2], [])
-@test DiffEqCAS.iv_divisibility(x2, component_system) === DiffEqCAS.haszero
+@test DiffEqCAS.factor_divisibility(x2, component_system).status === DiffEqCAS.haszero

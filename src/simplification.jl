@@ -238,32 +238,221 @@ function _constraints_exclude_zero(constraints, iv)
     end
 end
 
-function singlet_divisibility(singlet, sys::DiffEqSystem)
-    if singlet isa Number
-        if singlet != 0
-            return true
+"""
+    DivisibilityEvidence
+
+Internal result for the factor zero-set pipeline.  The public decision is
+`status`; `stage` and `detail` make numerical decisions inspectable and give
+later stages a place to return their proof object.
+"""
+struct DivisibilityEvidence
+    status::DivisState
+    stage::Symbol
+    detail::Any
+end
+
+_proven(status::DivisState, stage, detail=nothing) =
+    DivisibilityEvidence(status, stage, detail)
+
+# Domain components are kept separate because a factor may be nonzero on one
+# connected component and zero on another.
+function _divisibility_components(sys::DiffEqSystem, factor)
+    factor_variables = Set(Symbolics.get_variables(Symbolics.unwrap(factor)))
+    return [
+        (key, constraints) for (key, constraints) in sys.domain
+        if !isempty(intersect(factor_variables, Set(_key_variables(key))))
+    ]
+end
+
+function _divisibility_cache_key(factor, components)
+    # TODO: Replace this structural tuple with the canonical expression/domain
+    # key used by the global cache once cache invalidation is finalized.
+    (:divisibility, Symbolics.unwrap(factor), components)
+end
+
+"""
+Cheap exact facts that apply to any already-factored expression.
+
+This is intentionally not another factorization pass.  The caller has
+factored the differential equation already; this stage only recognizes facts
+such as literal zero/nonzero and exact simplification.
+"""
+function _exact_factor_divisibility(factor, sys::DiffEqSystem)
+    value = SymbolicUtils.unwrap_const(Symbolics.unwrap(factor))
+    value isa Number &&
+        return _proven(value == 0 ? haszero : divisible, :exact, value)
+
+    simplified = simplify(factor)
+    simplified_value = SymbolicUtils.unwrap_const(Symbolics.unwrap(simplified))
+    simplified_value isa Number &&
+        return _proven(simplified_value == 0 ? haszero : divisible,
+                       :exact_simplification, simplified_value)
+
+    return nothing
+end
+
+function _variable_factor_divisibility(factor, components)
+    # This is the retained fast specialization for a leaf independent
+    # variable. Its sign and relation helpers are no longer a separate
+    # divisibility pipeline; they are one stage of factor_divisibility.
+    for (key, constraints) in components
+        _contains_equal(_key_variables(key), factor) || continue
+        inferred_sign = _infer_variable_sign(constraints, factor)
+        inferred_sign === nothing ||
+            setmetadata(Symbolics.unwrap(factor), VarSign, inferred_sign)
+        _constraints_exclude_zero(constraints, factor) &&
+            return _proven(divisible, :variable_constraints)
+
+        component = [key => constraints]
+        if constraints_satisfiable([factor ≤ 0, factor ≥ 0], component, true)
+            return _proven(haszero, :variable_zero_feasibility)
         end
-        return false
-    elseif _contains_equal(sys.ps, singlet)
-        return true
-    elseif _contains_equal(sys.ivs, singlet)
-        return ivs_polynomial_divisibility(singlet, sys)
+
+        # TODO: This is the old behavior and is only sound when the
+        # satisfiability result is certified. Once constraints_satisfiable
+        # exposes an unresolved state, return `undetermined` for that state.
+        return _proven(divisible, :variable_domain_exclusion)
     end
-    return false
+    return _proven(divisible, :independent_variable)
+end
+
+"""
+Cheap domain reasoning for a general factor.
+
+The old affine/sign helpers are deliberately retained behind the variable
+specialization below. They should be generalized in two directions:
+
+* affine factors: reuse `_affine_coefficients` after normalizing the factor;
+* monotone/factored expressions: combine factor sign facts without factoring
+  the already-factored differential equation again.
+
+The arbitrary-expression case needs zero-set reasoning, not merely a renamed
+variable substitution.
+"""
+function _cheap_factor_divisibility(factor, components, sys::DiffEqSystem)
+    _contains_equal(sys.ps, factor) &&
+        return _proven(divisible, :parameter)
+
+    if _contains_equal(sys.ivs, factor) &&
+        !SymbolicUtils.istree(Symbolics.unwrap(factor))
+        return _variable_factor_divisibility(factor, components)
+    end
+
+    # TODO: Add `_affine_factor_divisibility` here. It should use the existing
+    # affine coefficient/sign helpers for factors such as `a*x + b`, then
+    # certify whether the affine zero set intersects each domain component.
+    #
+    # TODO: Add a generic symbolic zero-set stage here:
+    # PSEUDOCODE:
+    #   for constraint in component constraints
+    #       classify constraint under factor == 0
+    #       if contradiction is certified, return divisible
+    #       if a feasible zero is certified, return haszero
+    #   end
+    #   return nothing
+    return nothing
+end
+
+"""
+Natural interval evaluation over each domain component.
+
+TODO (implementation): obtain the component boxes without invoking paving,
+evaluate `factor` with `_domain_interval_value` (extended for all supported
+registered functions), and return:
+* `divisible` only when every feasible box excludes zero;
+* `haszero` only with a certified feasible zero;
+* `nothing` when interval dependency leaves the result unresolved.
+"""
+function _interval_factor_divisibility(factor, components, sys::DiffEqSystem)
+    return nothing # PSEUDOCODE: replace with interval evaluation.
+end
+
+"""
+Centered/mean-value interval form.
+
+TODO (implementation): use the midpoint and interval extensions of the
+gradient to tighten each component enclosure.  This is applicable to
+transcendental expressions as well as polynomials and must remain conservative
+when a derivative extension is unavailable.
+"""
+function _centered_factor_divisibility(factor, components, sys::DiffEqSystem)
+    return nothing # PSEUDOCODE: replace with centered/mean-value forms.
+end
+
+"""
+Univariate polynomial specialization.
+
+TODO (implementation): call Sturm root isolation only when `factor` is
+provably a polynomial in exactly one independent variable.  Treating
+`sin(x)`/`exp(x)` as polynomial atoms is not sufficient for this stage.
+"""
+function _sturm_factor_divisibility(factor, components, sys::DiffEqSystem)
+    return nothing # PSEUDOCODE: replace with certified Sturm isolation.
+end
+
+"""
+Final general fallback.
+
+TODO (implementation): formulate `domain ∧ factor == 0` and call
+`_pave_constraints`/`f_pave_constraints`.  An unresolved boundary box must
+produce `undetermined`, never `divisible`.
+"""
+function _paved_factor_divisibility(factor, components, sys::DiffEqSystem)
+    return nothing # PSEUDOCODE: replace with zero-set paving.
+end
+
+function _factor_divisibility_uncached(factor, sys::DiffEqSystem)
+    exact = _exact_factor_divisibility(factor, sys)
+    exact !== nothing && return exact
+
+    _contains_equal(sys.ps, factor) &&
+        return _proven(divisible, :parameter)
+
+    components = _divisibility_components(sys, factor)
+    isempty(components) &&
+        return _proven(undetermined, :parameter_or_domain_independent)
+
+    # Each stage returns nothing when it cannot prove a result.  This ordering
+    # keeps cheap heuristics ahead of increasingly expensive numerical work.
+    for stage in (
+        _cheap_factor_divisibility,
+        _interval_factor_divisibility,
+        _centered_factor_divisibility,
+        _sturm_factor_divisibility,
+        _paved_factor_divisibility,
+    )
+        result = stage(factor, components, sys)
+        result !== nothing && return result
+    end
+
+    return _proven(undetermined, :unresolved)
+end
+
+function factor_divisibility(factor, sys::DiffEqSystem)
+    components = _divisibility_components(sys, factor)
+    key = _divisibility_cache_key(factor, components)
+    haskey(cache, key) && return cache[key]
+    result = _factor_divisibility_uncached(factor, sys)
+    cache[key] = result
+    return result
+end
+
+function _has_depvar_or_diff(expr, sys::DiffEqSystem)
+    any(variable -> _contains_equal(sys.dvs, variable),
+        Symbolics.get_variables(Symbolics.unwrap(expr))) && return true
+
+    expression = Symbolics.unwrap(expr)
+    SymbolicUtils.istree(expression) || return false
+    Symbolics.operation(expression) isa Differential && return true
+    any(argument -> _has_depvar_or_diff(argument, sys),
+        SymbolicUtils.arguments(expression))
 end
 
 function _can_divide_by(expr::Symbolics.Num, sys::DiffEqSystem)
-    expr_u = unwrap(expr)
-    if !SymbolicUtils.istree(expr_u)
-        return singlet_divisibility(expr_u)
-    elseif _has_depvar_or_diff(expr)
-        return false
-    end
+    _contains_equal(sys.dvs, expr) && return false
+    _has_depvar_or_diff(expr, sys) && return false
 
-
-
-    # handles things like derivatives of dvs, since their operator is Differential
-    return false, sys
+    return factor_divisibility(expr, sys).status === divisible
 end
 
 function common_divisors(expr, sys::DiffEqSystem)
