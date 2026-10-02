@@ -136,3 +136,4 @@ is_integer(x) = x isa Integer
 is_domain(x) = x isa SymbolicDomain
 
 @variables π e #what else?...
+
