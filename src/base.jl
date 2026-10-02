@@ -59,20 +59,20 @@ function append_derivation(history::DerivationHistory, step::DerivationStep)
     DerivationHistory(vcat(history.steps, [step]))
 end
 
-struct CoordinateTransformationStep <: DerivationStep
+struct CoordTransformStep <: DerivationStep
     iv_mapping::Dict
     old_ivs::Vector{Symbolics.Num}
     new_ivs::Vector{Symbolics.Num}
     jacobian_inverse::Any
 end
 
-struct ParameterTransformationStep <: DerivationStep
+struct ParamTransformStep <: DerivationStep
     mapping::Dict
     old_parameters::Vector{Symbolics.Num}
     new_parameters::Vector{Symbolics.Num}
 end
 
-struct DependentVariableTransformationStep <: DerivationStep
+struct DepVarTransformStep <: DerivationStep
     mapping::Dict
     old_dvs::Vector{Symbolics.Num}
     new_dvs::Vector{Symbolics.Num}
@@ -141,7 +141,7 @@ collapses repeated factors such as `A^3 * B^2` into the distinct branches
 """
 mutable struct DiffEqSystem
     branches::Vector{DiffEqBranch}
-    pending::Stack{DiffEqBranch}
+    pending::Stack{DiffEqBranch} #I think I want to move the pending field
     completed::Vector{DiffEqBranch}
     seen::Set{UInt}
 end
@@ -219,7 +219,7 @@ end
 # so mathematically identical but structurally reordered branches also merge.
 working_systems = Stack{DiffEqSystem}()
 
-const cache_size = Ref{Int64}(100)
+const cache_size = Ref{Int64}(1024)
 
 global cache = LRU{Any,Any}(maxsize=cache_size[])
 

@@ -21,7 +21,7 @@ function change_parameters(sys::DiffEqBranch, param_mapping::Dict)
         push!(transformed_bcs, simplify(SPECIAL_REWRITER(slhs)) ~ simplify(SPECIAL_REWRITER(srhs)))
     end
     # *need to add a helper function for getting the new domains
-    step = ParameterTransformationStep(
+    step = ParamTransformStep(
         param_mapping, sys.ps, new_params)
     return DiffEqBranch(eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs,
         ps=new_params, bcs=transformed_bcs, domain=sys.domain, name=sys.name,
@@ -180,7 +180,7 @@ function change_ivs(sys::DiffEqBranch, new_ivs::Vector{Symbolics.Num}, iv_mappin
     new_domains = transform_domains(sys.domain, iv_mapping, final_ivs)
 
     new_dvs = [Symbolics.wrap(custom_rewrite(unwrap(dv), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)) for dv in sys.dvs]
-    step = CoordinateTransformationStep(
+    step = CoordTransformStep(
         iv_mapping, sys.ivs, new_ivs, J_inv)
     return DiffEqBranch(eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs,
         ps=params, bcs=transformed_bcs, domain=new_domains, name=sys.name,
@@ -292,7 +292,7 @@ function change_dvs(sys::DiffEqBranch, new_dvs::Vector{Symbolics.Num}, dv_mappin
 
     # Passing sys.params assuming you want to retain the original params block manually
     mapping = Dict(old_dvs .=> dv_exprs)
-    step = DependentVariableTransformationStep(mapping, sys.dvs, final_dvs)
+    step = DepVarTransformStep(mapping, sys.dvs, final_dvs)
     return DiffEqBranch(eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs,
         ps=params, bcs=transformed_bcs, domain=sys.domain, name=sys.name,
         history=append_derivation(sys.history, step))

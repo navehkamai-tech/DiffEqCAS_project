@@ -11,8 +11,6 @@ Base.@kwdef struct SimplificationOptions
     max_steps::Int = 1024
     expand_mode::Symbol = :targeted
     enable_cancellation::Bool = true
-    enable_factorization::Bool = false
-    enable_branching::Bool = false
 end
 
 struct SimplificationStep <: DerivationStep
@@ -49,7 +47,7 @@ mutable struct SimplificationRun
 end
 
 function SimplificationRun(system::DiffEqSystem,
-                            options::SimplificationOptions=SimplificationOptions())
+    options::SimplificationOptions=SimplificationOptions())
     run = DiffEqSystem()
     foreach(branch -> push_branch!(run, branch), system.branches)
     SimplificationRun(run, SimplificationStep[], options, 0)
@@ -88,6 +86,9 @@ The normal forms are intentionally local:
   generators can be collected;
 * `:functions` recursively normalizes function arguments;
 * `:factorization` exposes a polynomial-like expression in algebraic atoms.
+
+I want to add in a step that is used only if there is more than one equation in sys.eqs, with an algorithm that simplifies the whole system rather than each equation separately. 
+I don't know any more details, so for now this is all I'm adding
 
 Each mode is a hook for a more precise normalizer.  Keeping the policy here
 prevents every later stage from independently expanding the same expression.
@@ -276,7 +277,7 @@ The current implementation has one branch; the worklist and branch hook are
 already wired so adding decomposition does not change this public contract.
 """
 function simplify_system(sys::DiffEqSystem;
-                         options=SimplificationOptions())
+    options=SimplificationOptions())
     run = SimplificationRun(sys, options)
     while !isempty(run.system.pending)
         run.steps += 1
@@ -287,7 +288,7 @@ function simplify_system(sys::DiffEqSystem;
         current = pop!(run.system.pending)
         simplified = _simplify_one_system!(run, current)
         branches, branch_status = options.enable_branching ?
-            _branch_stage(simplified) : ([simplified], :not_requested)
+                                  _branch_stage(simplified) : ([simplified], :not_requested)
 
         if length(run.system.completed) + length(run.system.pending) +
             length(branches) >
