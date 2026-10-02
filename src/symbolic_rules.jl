@@ -1,3 +1,46 @@
+# Rules are grouped by required assumptions and pipeline stage.  The
+# simplification pipeline can later select a safe group without enabling
+# branch-sensitive identities globally.
+const EXP_LOG_RULES = [
+    @rule(~x/exp(~y) => ~x*exp(-~y)),
+    @rule(exp(~x)^~n => exp(~x*~n)),
+    @rule(exp(log(~x::is_positive)) => ~x),
+    @rule(log(exp(~x::is_real)) => ~x),
+    @rule(log(~x)+log(~y) => log(~x * ~y)),
+    @rule(log(~x)-log(~y) => log(~x/~y)),
+    @rule(~n*log(~x) => log(~x^~n)),
+]
+const POWER_RULES = [
+    @rule(~z/(~x::is_divisible)^(~y) => ~z*~x^(-~y)),
+    @rule(((~x::is_positive)^(~y))^(~z) => (~x)^(~y*~z)),
+    @rule(sqrt((~x::is_real)^2) => abs(~x)),
+]
+const ABSOLUTE_VALUE_RULES = [
+    @rule(abs(~x*~y) => abs(~x)*abs(~y)),
+    @rule(abs((~x::is_real)^2) => (~x)^2),
+    @rule(abs((~x::is_real)^(2*~n)) => (~x)^(2*~n)),
+    @rule((abs(~x))^2 => (~x)^2),
+    @rule((abs(~x)^(2*~n)) => (~x)^(2*~n)),
+    @rule(abs(~x::is_positive) => ~x),
+    @rule(abs(~x::is_negative) => -~x),
+]
+const TRIGONOMETRIC_RULES = [
+    @rule(sin(~x+2*π) => sin(~x)),
+    @rule(sin(~x+2*π*~n::is_integer) => sin(~x)),
+    @rule(cos(~x+2*π) => cos(~x)),
+    @rule(cos(~x+2*π*~n::is_integer) => cos(~x)),
+    @rule(sin(~x)^2 => 1//2-1//2*cos(2*~x)),
+    @rule(cos(~x)^2 => 1//2+1//2*cos(2*~x)),
+    @rule(tan(~x) => sin(~x)/cos(~x))
+]
+const SYMBOLIC_RULE_GROUPS = (
+    function_arguments = vcat(EXP_LOG_RULES, TRIGONOMETRIC_RULES),
+    positive_domain = vcat(POWER_RULES, ABSOLUTE_VALUE_RULES),
+)
+
+# TODO: Build stage-specific rewriters from SYMBOLIC_RULE_GROUPS.  Predicates
+# must prove positivity, reality, or integrality before enabling a group.
+
 #defining special functions
 #Dirac Delta function
 @register_symbolic Dirac(x::AbstractVector, n::Any)

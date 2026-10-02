@@ -289,12 +289,12 @@ function constraints_to_domain(domain_pairs)
     return _pave_constraints(box, collected_constraints, all_vars, tolerance[])
 end
 
-function add_domain_paving(sys::DiffEqSystem)
+function add_domain_paving(sys::DiffEqBranch)
     sys.domain_set === nothing && (sys.domain_set = constraints_to_domain(sys.domain))
     return sys.domain_set
 end
 
-function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqSystem, include_boundary::Bool=true)
+function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqBranch, include_boundary::Bool=true)
     domain_data = constraints_to_domain(sys)
     domain_data === nothing && return false
     length(coord) == length(_domain_variables(sys.domain)) ||
@@ -304,6 +304,7 @@ function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqSystem, include_bo
     boxes = include_boundary ? (domain..., boundary...) : domain
     return any(coord ∈ box for box in boxes)
 end
+
 
 function is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector, include_boundary::Bool=true)
     length(coord) == length(_domain_variables(domain_constraints)) ||
@@ -334,4 +335,11 @@ function constraints_satisfiable(
     result === nothing && return false
     domain, boundary = result
     return include_boundary ? (!isempty(domain) || !isempty(boundary)) : !isempty(domain)
+end
+
+add_domain_paving(sys::DiffEqSystem) = foreach(add_domain_paving, sys.branches)
+
+function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqSystem,
+                      include_boundary::Bool=true)
+    all(is_in_domain(coord, branch, include_boundary) for branch in sys.branches)
 end

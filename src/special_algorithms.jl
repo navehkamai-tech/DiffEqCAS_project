@@ -1,13 +1,15 @@
 
-function nondimensionalize_pde(sys::DiffEqSystem, basis=SI_BASIS)
+function nondimensionalize_pde(sys::DiffEqBranch, basis=SI_BASIS)
     if !has_full_dimensions(sys)
         throw(IOError("all symbols must have units for nondimensionalization"))
     end
+
     for eq in vcat(sys.eqs, sys.bcs)
         if !(eq.rhs==0||ModelingToolkit.get_unit(eq.lhs)==ModelingToolkit.get_unit(eq.rhs))
             throw(IOError("$(eq) has different units on each side"))
         end
     end
+
     vars=vcat(sys.ivs, sys.ps)
     dimensional_matrix = hcat(get_unit_vector.(vars)...)
     new_dvs_mapping = Dict{Symbol,Symbol}() #check if these types are correct. keys are the old dvs, values are the corresponding expressions
@@ -39,3 +41,5 @@ function nondimensionalize_pde(sys::DiffEqSystem, basis=SI_BASIS)
     end
 end
 
+nondimensionalize_pde(sys::DiffEqSystem, basis=SI_BASIS) =
+    DiffEqSystem([nondimensionalize_pde(branch, basis) for branch in sys.branches])

@@ -1,8 +1,10 @@
 #=
-goals: 
-1) have a stack of the current systems being processed. certain processes will output multiple systems rather than one, so a stack is needed to manage it
-2) have a LRUCache for global caching. create the function that gives a value to each thing cached
-3) add a field to the DiffEqSystem struct for it's history. update functions to append the current process to the outputted system's history
+Goals:
+1) keep a stack of branches being processed; a split can produce several
+   branches while preserving the union represented by the parent system;
+2) keep a session-local LRU cache for expensive semantic checks;
+3) store accepted derivation steps on each branch, so every branch retains its
+   own history after repeated transformations and factor splits.
 =#
 
 struct SymbolicDomain
@@ -45,7 +47,45 @@ _domain_pairs(domain) = domain
 domain_variables(domain::SymbolicDomain) = copy(domain.variables)
 domain_components(domain::SymbolicDomain) = copy(domain.pairs)
 
-mutable struct DiffEqSystem{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symbolics.Num},P<:AbstractVector{<:Symbolics.Num},E<:AbstractVector{<:Symbolics.Equation},B<:AbstractVector{<:Symbolics.Equation},T<:AbstractVector}
+abstract type DerivationStep end
+
+struct DerivationHistory
+    steps::Vector{DerivationStep}
+end
+
+DerivationHistory() = DerivationHistory(DerivationStep[])
+
+function append_derivation(history::DerivationHistory, step::DerivationStep)
+    DerivationHistory(vcat(history.steps, [step]))
+end
+
+struct CoordinateTransformationStep <: DerivationStep
+    iv_mapping::Dict
+    old_ivs::Vector{Symbolics.Num}
+    new_ivs::Vector{Symbolics.Num}
+    jacobian_inverse::Any
+end
+
+struct ParameterTransformationStep <: DerivationStep
+    mapping::Dict
+    old_parameters::Vector{Symbolics.Num}
+    new_parameters::Vector{Symbolics.Num}
+end
+
+struct DependentVariableTransformationStep <: DerivationStep
+    mapping::Dict
+    old_dvs::Vector{Symbolics.Num}
+    new_dvs::Vector{Symbolics.Num}
+end
+
+struct FactorStep <: DerivationStep
+    factors::Vector{Any}
+    selected_factor::Any
+    branch_index::Union{Nothing,Int}
+end
+
+mutable struct DiffEqBranch{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symbolics.Num},P<:AbstractVector{<:Symbolics.Num},E<:AbstractVector{<:Symbolics.Equation},B<:AbstractVector{<:Symbolics.Equation},T<:AbstractVector}
+    identifier::Int
     name::String
     ivs::I
     dvs::D
@@ -55,9 +95,12 @@ mutable struct DiffEqSystem{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector
     domain::SymbolicDomain
     domain_set::Union{Nothing,Tuple{<:AbstractVector{<:IntervalBoxes.IntervalBox},<:AbstractVector{<:IntervalBoxes.IntervalBox}}}
     trivial_sols::T
+    # TODO: Replace `trivial_sols` with a branch-local record of factors
+    # already split out, so repeated factorization cannot create duplicates.
+    history::DerivationHistory
 end
 
-function Base.setproperty!(sys::DiffEqSystem, name::Symbol, value)
+function Base.setproperty!(sys::DiffEqBranch, name::Symbol, value)
     if name === :domain
         normalized = value isa SymbolicDomain ? value : SymbolicDomain(value)
         setfield!(sys, :domain, normalized)
@@ -67,24 +110,113 @@ function Base.setproperty!(sys::DiffEqSystem, name::Symbol, value)
     setfield!(sys, name, value)
 end
 
-function DiffEqSystem(eqs, bcs, domain, ivs, dvs; ps=Symbolics.Num[], name=:system,
-    domain_set=nothing, trivial_solutions=Any[])
+function DiffEqBranch(eqs, bcs, domain, ivs, dvs; identifier=0, ps=Symbolics.Num[], name=:system,
+    domain_set=nothing, trivial_solutions=Any[], history=DerivationHistory())
     normalized_ivs = Symbolics.Num[ivs...]
     normalized_dvs = Symbolics.Num[dvs...]
     normalized_ps = Symbolics.Num[ps...]
     normalized_eqs = Symbolics.Equation[eqs...]
     normalized_bcs = Symbolics.Equation[bcs...]
     normalized_domain = domain isa SymbolicDomain ? domain : SymbolicDomain(domain)
-    DiffEqSystem(String(name), normalized_ivs, normalized_dvs, normalized_ps,
-        normalized_eqs, normalized_bcs, normalized_domain, domain_set, trivial_solutions)
+    DiffEqBranch(identifier, String(name), normalized_ivs, normalized_dvs, normalized_ps,
+        normalized_eqs, normalized_bcs, normalized_domain, domain_set,
+        trivial_solutions, history)
+end
+
+function DiffEqBranch(; eqs, ivs, dvs, ps=Symbolics.Num[], bcs=Symbolics.Equation[],
+    domain=Pair[], name=:system, domain_set=nothing, trivial_solutions=Any[],
+    history=DerivationHistory(), identifier=0)
+    DiffEqBranch(eqs, bcs, domain, ivs, dvs; identifier=identifier, ps=ps, name=name,
+        domain_set=domain_set, trivial_solutions=trivial_solutions,
+        history=history)
+end
+
+"""
+Collection of branches representing a union of solution sets.
+
+`seen` stores structural fingerprints, not derivation history.  This makes
+duplicate suppression independent of how a branch was reached and naturally
+collapses repeated factors such as `A^3 * B^2` into the distinct branches
+`A = 0` and `B = 0`.
+"""
+mutable struct DiffEqSystem
+    branches::Vector{DiffEqBranch}
+    pending::Stack{DiffEqBranch}
+    completed::Vector{DiffEqBranch}
+    seen::Set{UInt}
+end
+
+function DiffEqSystem(branches::Vector{<:DiffEqBranch}=DiffEqBranch[])
+    normalized = DiffEqBranch[branches...]
+    system = DiffEqSystem(normalized, Stack{DiffEqBranch}(),
+        DiffEqBranch[], Set{UInt}())
+    for branch in normalized
+        branch.identifier == 0 &&
+            (branch.identifier = reinterpret(Int, hash((branch.eqs, branch.bcs,
+                branch.domain.pairs))))
+        push!(system.seen, _branch_fingerprint(branch))
+    end
+    system
+end
+
+function DiffEqSystem(eqs, bcs, domain, ivs, dvs; kwargs...)
+    DiffEqSystem([DiffEqBranch(eqs, bcs, domain, ivs, dvs; kwargs...)])
 end
 
 function DiffEqSystem(; eqs, ivs, dvs, ps=Symbolics.Num[], bcs=Symbolics.Equation[],
-    domain=Pair[], name=:system, domain_set=nothing, trivial_solutions=Any[])
-    DiffEqSystem(eqs, bcs, domain, ivs, dvs; ps=ps, name=name,
-        domain_set=domain_set, trivial_solutions=trivial_solutions)
+    domain=Pair[], name=:system, domain_set=nothing, trivial_solutions=Any[],
+    history=DerivationHistory(), identifier=0)
+    DiffEqSystem([DiffEqBranch(eqs=eqs, ivs=ivs, dvs=dvs, ps=ps, bcs=bcs,
+        domain=domain, name=name, domain_set=domain_set,
+        trivial_solutions=trivial_solutions, history=history,
+        identifier=identifier)])
 end
 
+DiffEqSystem() = DiffEqSystem(DiffEqBranch[])
+
+function Base.getproperty(system::DiffEqSystem, name::Symbol)
+    name in (:branches, :pending, :completed, :seen) &&
+        return getfield(system, name)
+    length(system.branches) == 1 ||
+        throw(ArgumentError("$(name) is branch-specific; select a branch first"))
+    getproperty(only(system.branches), name)
+end
+
+function Base.setproperty!(system::DiffEqSystem, name::Symbol, value)
+    name in (:branches, :pending, :completed, :seen) &&
+        return setfield!(system, name, value)
+    length(system.branches) == 1 ||
+        throw(ArgumentError("$(name) is branch-specific; select a branch first"))
+    setproperty!(only(system.branches), name, value)
+end
+
+Base.length(system::DiffEqSystem) = length(system.branches)
+Base.getindex(system::DiffEqSystem, index::Int) = system.branches[index]
+Base.iterate(system::DiffEqSystem, state...) = iterate(system.branches, state...)
+
+function _branch_fingerprint(branch::DiffEqBranch)
+    hash((branch.ivs, branch.dvs, branch.ps, branch.eqs, branch.bcs,
+        branch.domain.pairs, branch.trivial_sols))
+end
+
+function push_branch!(system::DiffEqSystem, branch::DiffEqBranch)
+    branch.identifier == 0 &&
+        (branch.identifier = reinterpret(Int, hash((branch.eqs, branch.bcs,
+            branch.domain.pairs))))
+    fingerprint = _branch_fingerprint(branch)
+    fingerprint in system.seen && return false
+    push!(system.seen, fingerprint)
+    push!(system.pending, branch)
+    true
+end
+
+function complete_branch!(system::DiffEqSystem, branch::DiffEqBranch)
+    push!(system.completed, branch)
+    branch
+end
+
+# TODO: add canonical expression/domain normalization to `_branch_fingerprint`
+# so mathematically identical but structurally reordered branches also merge.
 working_systems = Stack{DiffEqSystem}()
 
 const cache_size = Ref{Int64}(100)
