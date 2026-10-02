@@ -1,56 +1,18 @@
 """
 Configuration for the system simplifier.
 
-The limits are deliberately explicit.  Simplification can increase expression
-size or branch count, so an unresolved result must be returned rather than
-silently spending unbounded time trying to reach a smaller expression.
+The pass limit is deliberately explicit. Simplification can increase
+expression size, so the number of fixed-point passes is bounded.
 """
 Base.@kwdef struct SimplificationOptions
     max_passes::Int = 4
-    max_branches::Int = 128
-    max_steps::Int = 1024
     expand_mode::Symbol = :targeted
     enable_cancellation::Bool = true
+    enable_factorization::Bool = false
 end
 
 struct SimplificationStep <: DerivationStep
-    stage::Symbol
-    before::Any
-    after::Any
-    detail::Any
-end
-
-struct SimplificationResult
-    system::DiffEqSystem
-    trace::Vector{SimplificationStep}
-    status::Symbol
-end
-
-function Base.getproperty(result::SimplificationResult, name::Symbol)
-    name === :systems && return getfield(result, :system).branches
-    getfield(result, name)
-end
-
-"""
-State owned by one call to `simplify_system`.
-
-`pending` is a depth-first worklist.  `completed` contains terminal systems.
-The global `working_systems` in `base.jl` remains available for compatibility
-and debugging, but the pipeline itself owns a fresh run object so nested or
-independent system operations cannot consume another run's work.
-"""
-mutable struct SimplificationRun
-    system::DiffEqSystem
-    trace::Vector{SimplificationStep}
     options::SimplificationOptions
-    steps::Int
-end
-
-function SimplificationRun(system::DiffEqSystem,
-    options::SimplificationOptions=SimplificationOptions())
-    run = DiffEqSystem()
-    foreach(branch -> push_branch!(run, branch), system.branches)
-    SimplificationRun(run, SimplificationStep[], options, 0)
 end
 
 _simplification_expression(eq::Symbolics.Equation) = unwrap(eq.lhs - eq.rhs)
@@ -199,60 +161,31 @@ function _factorization_stage(sys::DiffEqBranch)
     sys, :not_implemented
 end
 
-"""
-Run the branch-generation hook.
-
-A future implementation will turn a certified factorization `A * B = 0`
-into two systems, both inheriting the current domain and boundary conditions.
-Any branch-specific nonzero assumptions must be added to that branch's domain
-before it is pushed.  No branch is created by this placeholder.
-"""
-function _branch_stage(sys::DiffEqBranch)
-    # TODO: remove constant nonzero factors and reject impossible factors.
-    # TODO: create one copied system per dependent-variable factor.
-    # TODO: deduplicate equivalent branches and enforce max_branches.
-    [sys], :not_implemented
-end
-
-function _record!(run, stage, before, after, detail=nothing)
-    push!(run.trace, SimplificationStep(stage, before, after, detail))
-end
-
-function _simplify_one_system!(run::SimplificationRun, sys::DiffEqBranch)
+function _simplify_one_system(sys::DiffEqBranch, options::SimplificationOptions)
     current = sys
 
     # Each pass returns to a stable structural form before the next concern.
-    for _ in 1:run.options.max_passes
-        before = current
+    for _ in 1:options.max_passes
+        pass_start = current
         current = _apply_symbolic_stage(current, :structural)
-        _record!(run, :derivative_normalization, before, current)
 
-        before = current
         current = _apply_symbolic_stage(current, :grouping)
-        _record!(run, :grouping_normalization, before, current)
 
-        if run.options.enable_cancellation
-            before = current
-            current, detail = _cancel_system(current)
-            _record!(run, :certified_cancellation, before, current, detail)
+        if options.enable_cancellation
+            current, _ = _cancel_system(current)
         end
 
-        before = current
         current = _apply_symbolic_stage(current, :functions)
-        _record!(run, :function_simplification, before, current)
 
-        if run.options.enable_factorization
-            before = current
-            current, detail = _factorization_stage(current)
-            _record!(run, :factorization, before, current, detail)
+        if options.enable_factorization
+            current, _ = _factorization_stage(current)
         end
 
-        before = current
         current = _apply_symbolic_stage(current, :structural)
-        _record!(run, :recollection, before, current)
 
-        isequal(current.eqs, before.eqs) && isequal(current.bcs, before.bcs) &&
-            return current
+        isequal(current.eqs, pass_start.eqs) &&
+            isequal(current.bcs, pass_start.bcs) &&
+            break
     end
 
     if !isequal(current.eqs, sys.eqs) || !isequal(current.bcs, sys.bcs)
@@ -262,7 +195,7 @@ function _simplify_one_system!(run::SimplificationRun, sys::DiffEqBranch)
             bcs=current.bcs, domain=current.domain, name=current.name,
             domain_set=current.domain_set, trivial_solutions=current.trivial_sols,
             history=append_derivation(sys.history,
-                SimplificationStep(:pipeline, sys, current, nothing)),
+                SimplificationStep(options)),
         )
     end
     current
@@ -271,42 +204,22 @@ end
 """
     simplify_system(sys; options...)
 
-Simplify one system through the staged pipeline.  The result always contains
-the terminal systems, including systems produced by future factor splitting.
-The current implementation has one branch; the worklist and branch hook are
-already wired so adding decomposition does not change this public contract.
+Simplify every branch in a system through the staged pipeline and return the
+resulting `DiffEqSystem`.
+
+Factorization remains an optional canonicalization stage controlled by
+`SimplificationOptions.enable_factorization`. It does not split branches;
+solution-set decomposition belongs to the separate factorization/derivation
+pipeline.
+
+The input is not mutated. A changed branch receives one aggregate
+`SimplificationStep`; internal passes are deliberately not recorded as
+separate derivation steps.
 """
 function simplify_system(sys::DiffEqSystem;
     options=SimplificationOptions())
-    run = SimplificationRun(sys, options)
-    while !isempty(run.system.pending)
-        run.steps += 1
-        if run.steps > options.max_steps
-            return SimplificationResult(run.system, run.trace, :max_steps)
-        end
-
-        current = pop!(run.system.pending)
-        simplified = _simplify_one_system!(run, current)
-        branches, branch_status = options.enable_branching ?
-                                  _branch_stage(simplified) : ([simplified], :not_requested)
-
-        if length(run.system.completed) + length(run.system.pending) +
-            length(branches) >
-            options.max_branches
-            return SimplificationResult(run.system, run.trace, :max_branches)
-        end
-
-        # A real split returns branches to the worklist so every child gets
-        # the same normalization/cancellation/finalization treatment.  The
-        # placeholder hook is terminal and therefore records the current
-        # system exactly once.
-        if branch_status === :split
-            foreach(branch -> push_branch!(run.system, branch), branches)
-        else
-            foreach(branch -> complete_branch!(run.system, branch), branches)
-        end
-    end
-
-    run.system.branches = run.system.completed
-    SimplificationResult(run.system, run.trace, :fixed_point)
+    DiffEqSystem([
+        _simplify_one_system(branch, options)
+        for branch in sys.branches
+    ])
 end
