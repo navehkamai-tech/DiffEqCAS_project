@@ -425,6 +425,13 @@ function _affine_factor_divisibility(factor, components, sys::DiffEqSystem)
     return _proven(divisible, :affine_domain_exclusion, iv)
 end
 
+# TODO: Extend affine zero-set reasoning to factors involving multiple
+# independent variables. Require all variables to belong to one domain
+# component, verify that `_affine_coefficients` generalizes across every
+# variable, and query `constraints_satisfiable([factor == 0], component,
+# true)`. Return `haszero` for a certified feasible zero, `divisible` for a
+# certified exclusion, and `undetermined` whenever the solver is unresolved.
+
 """
 Natural interval evaluation over each domain component.
 
