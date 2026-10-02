@@ -378,9 +378,9 @@ function _cheap_factor_divisibility(factor, components, sys::DiffEqSystem)
         return _variable_factor_divisibility(factor, components)
     end
 
-    # TODO: Add `_affine_factor_divisibility` here. It should use the existing
-    # affine coefficient/sign helpers for factors such as `a*x + b`, then
-    # certify whether the affine zero set intersects each domain component.
+    affine = _affine_factor_divisibility(factor, components, sys)
+    affine !== nothing && return affine
+
     #
     # TODO: Add a generic symbolic zero-set stage here:
     # PSEUDOCODE:
@@ -391,6 +391,38 @@ function _cheap_factor_divisibility(factor, components, sys::DiffEqSystem)
     #   end
     #   return nothing
     return nothing
+end
+
+"""
+    _affine_factor_divisibility(factor, components, sys)
+
+Classify a factor that is affine in one independent variable.  The domain
+solver already handles linear inequalities and equalities, so asking it
+whether the affine zero set is feasible gives a conservative, reusable proof
+without factoring the expression again.
+"""
+function _affine_factor_divisibility(factor, components, sys::DiffEqSystem)
+    factor_variables = Symbolics.get_variables(Symbolics.unwrap(factor))
+    independent_variables = [
+        iv for iv in sys.ivs if _contains_equal(factor_variables, iv)
+    ]
+    length(independent_variables) == 1 || return nothing
+    iv = only(independent_variables)
+
+    coefficients = _affine_coefficients(Symbolics.unwrap(factor), Symbolics.unwrap(iv))
+    coefficients === nothing && return nothing
+    coefficient, _ = coefficients
+    coefficient_sign = _bound_sign(coefficient).sign
+    coefficient_sign in (positive, negative) || return nothing
+
+    for (key, constraints) in components
+        _contains_equal(_key_variables(key), iv) || continue
+        component = [key => constraints]
+        zero_feasible = constraints_satisfiable([factor == 0], component, true)
+        zero_feasible && return _proven(haszero, :affine_zero_feasibility, iv)
+    end
+
+    return _proven(divisible, :affine_domain_exclusion, iv)
 end
 
 """

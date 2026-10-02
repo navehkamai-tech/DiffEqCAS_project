@@ -29,3 +29,11 @@ positive_n = Symbolics.setmetadata(n, DiffEqCAS.VarSign, DiffEqCAS.positive)
 
 system = DiffEqSystem([], [], [x => [2x > 0]], [x], [])
 @test DiffEqCAS.factor_divisibility(x, system).status === DiffEqCAS.divisible
+
+positive_domain = DiffEqSystem([], [], [x => [x > 0]], [x], [])
+@test DiffEqCAS.factor_divisibility(x + 1, positive_domain).status === DiffEqCAS.divisible
+@test DiffEqCAS.factor_divisibility(x - 1, positive_domain).status === DiffEqCAS.haszero
+
+negative_domain = DiffEqSystem([], [], [x => [x < 0]], [x], [])
+@test DiffEqCAS.factor_divisibility(2x + 1, negative_domain).status === DiffEqCAS.haszero
+@test DiffEqCAS.factor_divisibility(2x - 1, negative_domain).status === DiffEqCAS.divisible
