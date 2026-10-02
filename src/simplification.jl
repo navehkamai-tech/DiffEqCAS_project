@@ -1,18 +1,14 @@
 """
 Configuration for the system simplifier.
 
-The limits are deliberately explicit.  Simplification can increase expression
-size or branch count, so exceeding a limit raises an error rather than silently
-spending unbounded time trying to reach a smaller expression.
+The pass limit is deliberately explicit. Simplification can increase
+expression size, so the number of fixed-point passes is bounded.
 """
 Base.@kwdef struct SimplificationOptions
     max_passes::Int = 4
-    max_branches::Int = 128
-    max_steps::Int = 1024
     expand_mode::Symbol = :targeted
     enable_cancellation::Bool = true
     enable_factorization::Bool = false
-    enable_branching::Bool = false
 end
 
 struct SimplificationStep <: DerivationStep
@@ -162,21 +158,6 @@ function _factorization_stage(sys::DiffEqBranch)
     sys, :not_implemented
 end
 
-"""
-Run the branch-generation hook.
-
-A future implementation will turn a certified factorization `A * B = 0`
-into two systems, both inheriting the current domain and boundary conditions.
-Any branch-specific nonzero assumptions must be added to that branch's domain
-before it is pushed.  No branch is created by this placeholder.
-"""
-function _branch_stage(sys::DiffEqBranch)
-    # TODO: remove constant nonzero factors and reject impossible factors.
-    # TODO: create one copied system per dependent-variable factor.
-    # TODO: deduplicate equivalent branches and enforce max_branches.
-    [sys], :not_implemented
-end
-
 function _simplify_one_system(sys::DiffEqBranch, options::SimplificationOptions)
     current = sys
 
@@ -220,53 +201,22 @@ end
 """
     simplify_system(sys; options...)
 
-Simplify one system through the staged pipeline and return its terminal
-branches as a `DiffEqSystem`.
+Simplify every branch in a system through the staged pipeline and return the
+resulting `DiffEqSystem`.
 
-The input is not mutated.  Simplification owns a fresh worklist system because
-the pending and completed queues are execution state, not part of the
-mathematical system supplied by the caller.  A changed branch receives one
-aggregate `SimplificationStep`; internal passes are deliberately not recorded
-as separate derivation steps.
+Factorization remains an optional canonicalization stage controlled by
+`SimplificationOptions.enable_factorization`. It does not split branches;
+solution-set decomposition belongs to the separate factorization/derivation
+pipeline.
 
-If a configured processing limit is exceeded, an error is raised rather than
-returning a status wrapper around a potentially incomplete system.
+The input is not mutated. A changed branch receives one aggregate
+`SimplificationStep`; internal passes are deliberately not recorded as
+separate derivation steps.
 """
 function simplify_system(sys::DiffEqSystem;
                          options=SimplificationOptions())
-    work = DiffEqSystem()
-    foreach(branch -> push_branch!(work, branch), sys.branches)
-    steps = 0
-
-    while !isempty(work.pending)
-        steps += 1
-        if steps > options.max_steps
-            throw(ArgumentError("simplification exceeded max_steps=$(options.max_steps)"))
-        end
-
-        current = pop!(work.pending)
-        simplified = _simplify_one_system(current, options)
-        branches, branch_status = options.enable_branching ?
-            _branch_stage(simplified) : ([simplified], :not_requested)
-
-        if length(work.completed) + length(work.pending) +
-            length(branches) >
-            options.max_branches
-            throw(ArgumentError(
-                "simplification exceeded max_branches=$(options.max_branches)"))
-        end
-
-        # A real split returns branches to the worklist so every child gets
-        # the same normalization/cancellation/finalization treatment.  The
-        # placeholder hook is terminal and therefore records the current
-        # system exactly once.
-        if branch_status === :split
-            foreach(branch -> push_branch!(work, branch), branches)
-        else
-            foreach(branch -> complete_branch!(work, branch), branches)
-        end
-    end
-
-    work.branches = work.completed
-    work
+    DiffEqSystem([
+        _simplify_one_system(branch, options)
+        for branch in sys.branches
+    ])
 end
