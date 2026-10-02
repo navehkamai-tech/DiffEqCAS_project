@@ -130,3 +130,4 @@ is_real(x) = x isa Real
 is_complex(x) = x isa Number && !(x isa Real)
 is_positive(x) = get_sign(x)==positive
 is_negative(x) = get_sign(x)==negative
+is_domain(x) = x isa SymbolicDomain

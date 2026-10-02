@@ -16,6 +16,7 @@ positive_a = Symbolics.setmetadata(a, DiffEqCAS.VarSign, DiffEqCAS.positive)
 @test DiffEqCAS._zero_excluded_by_relation(x^n > 0, x) == false
 @test DiffEqCAS._constraints_exclude_zero([x^2 > 0], x)
 @test DiffEqCAS._constraints_exclude_zero([x - positive_a > 0], x)
+@test DiffEqCAS.is_domain(SymbolicDomain([x => [x > 0]]))
 
 @test DiffEqCAS._relation_sign(x - a > 0, x) === DiffEqCAS.either
 @test !DiffEqCAS._constraints_exclude_zero([x - a > 0], x)
