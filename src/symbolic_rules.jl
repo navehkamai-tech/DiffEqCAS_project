@@ -1,4 +1,3 @@
-
 #defining special functions
 #Dirac Delta function
 @register_symbolic Dirac(x::AbstractVector, n::Any)

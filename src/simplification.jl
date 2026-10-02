@@ -1,17 +1,3 @@
-#rules for stuff simplify doesn't handle well
-#symbolic rule util functions
-notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
-is_pos_param(var) = notavariable(var) && get_sign(var) == positive
-is_neg_param(var) = notavariable(var) && get_sign(var) == negative
-is_number(x) = x isa Number
-is_real(x) = x isa Real
-is_complex(x) = x isa Number && !(x isa Real)
-is_positive(x) = get_sign(x)==positive
-is_negative(x) = get_sign(x)==negative
-is_divisible(x) = nothing #? needs to be filled in
-is_integer(x) = x isa Integer
-
-@variables π e #what else?...
 
 exponential_logarithmic_rules = [
     @rule(~x/exp(~y) => ~x*exp(-~y)),
