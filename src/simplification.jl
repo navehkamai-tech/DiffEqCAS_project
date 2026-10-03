@@ -17,9 +17,8 @@ Build a system from transformed residual expressions while preserving all
 system metadata.  Boundary conditions are normalized by the same expression
 normalizer but are never subjected to equation splitting in this pass.
 """
-function _with_simplified_expressions(sys::DiffEqBranch, eqs, bcs)
+function _with_simplified_expressions(sys::DiffEqBranch, eqs, bcs, restrictions)
     DiffEqBranch(
-        identifier=sys.identifier,
         eqs=eqs,
         ivs=sys.ivs,
         dvs=sys.dvs,
@@ -28,7 +27,7 @@ function _with_simplified_expressions(sys::DiffEqBranch, eqs, bcs)
         domain=sys.domain,
         name=sys.name,
         domain_set=sys.domain_set,
-        trivial_solutions=sys.restrictions,
+        restrictions=restrictions,
         history=sys.history,
     )
 end
@@ -67,7 +66,9 @@ function _cancel_system(sys::DiffEqBranch)
         push!(eqs, simplify(residual) ~ 0)
         push!(details, cancelled)
     end
-    _with_simplified_expressions(sys, eqs, sys.bcs), details
+    restrictions = [_normalize_restriction(restriction)
+                    for restriction in sys.restrictions]
+    _with_simplified_expressions(sys, eqs, sys.bcs, restrictions), details
 end
 
 """
@@ -79,15 +80,43 @@ expressions to reversible algebraic atoms, factor only polynomial residuals,
 and expand the result again to verify equivalence.
 """
 function _factorization_stage(sys::DiffEqBranch)
-    # TODO: classify each residual as polynomial in selected differential atoms.
-    # TODO: construct a reversible Symbolics <-> Nemo atom map.
-    # TODO: reject unsupported transcendental coefficients conservatively.
-    # TODO: round-trip the factored residual through expansion before accepting.
+    # TODO: For each residual:
+    #   1. Select differential expressions and dependent variables as atoms.
+    #   2. Build a reversible Symbolics <-> Nemo polynomial map.
+    #   3. Factor the polynomial in Nemo and verify the expanded round trip.
+    #   4. Normalize distinct factors; repeated powers create one branch.
+    #   5. Generate a disjoint ordered partition:
+    #        factor_1 = 0
+    #        factor_1 != 0, factor_2 = 0
+    #        ...
+    #   6. Inherit every parent restriction in each child.
+    # TODO: Keep unsupported or non-polynomial residuals unchanged.
     sys, :not_implemented
 end
 
+function _factorization_atoms(residual, sys::DiffEqBranch)
+    # TODO: Return the reversible atom list used by the Nemo polynomial map.
+    # Differential expressions and dependent-variable expressions must remain
+    # distinguishable when the polynomial is reconstructed.
+    nothing
+end
+
+function _factorization_partition(sys::DiffEqBranch, factors)
+    # TODO: Normalize factors, collapse repeated powers, and create one
+    # disjoint child per distinct factor.  For factor i, inherit all parent
+    # restrictions and add nonzero restrictions for factors 1:i-1; the child
+    # equation is factor i == 0.
+    DiffEqBranch[]
+end
+
 function _simplify_branch(sys::DiffEqBranch, max_passes::Int=4)
-    current = sys
+    current = DiffEqBranch(
+        eqs=sys.eqs, ivs=sys.ivs, dvs=sys.dvs, ps=sys.ps,
+        bcs=sys.bcs, domain=sys.domain, name=sys.name,
+        domain_set=sys.domain_set,
+        restrictions=[_normalize_restriction(r) for r in sys.restrictions],
+        history=sys.history,
+    )
 
     #= TODO: impliment the following simplification steps:
     1) expand derivatives
@@ -113,15 +142,15 @@ function _simplify_branch(sys::DiffEqBranch, max_passes::Int=4)
 
         isequal(current.eqs, pass_start.eqs) &&
             isequal(current.bcs, pass_start.bcs) &&
+        isequal(current.restrictions, pass_start.restrictions) &&
             break
     end
 
     if !isequal(current.eqs, sys.eqs) || !isequal(current.bcs, sys.bcs)
         current = DiffEqBranch(
-            identifier=sys.identifier,
             eqs=current.eqs, ivs=current.ivs, dvs=current.dvs, ps=current.ps,
             bcs=current.bcs, domain=current.domain, name=current.name,
-            domain_set=current.domain_set, trivial_solutions=current.restrictions,
+            domain_set=current.domain_set, restrictions=current.restrictions,
             history=append_derivation(sys.history,
                 SimplificationStep(max_passes)),
         )
@@ -142,7 +171,7 @@ separate derivation steps.
 function simplify_system(sys::DiffEqSystem;
     max_passes::Int=4)
     DiffEqSystem([
-        _simplify_one_system(branch, max_passes)
+        _simplify_branch(branch, max_passes)
         for branch in sys.branches
     ])
 end

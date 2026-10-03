@@ -27,9 +27,47 @@ struct SymbolicDomain
             end
             push!(normalized, key => collect(constraints))
         end
-        sort!(normalized, pair -> string(pair.key[begin]))
+        sort!(normalized, by = pair -> string(pair.first isa Tuple ? pair.first[begin] : pair.first))
         new(normalized, variables)
     end
+end
+
+"""
+    SymbolicRestriction(residual, relation)
+
+A branch-local relation between a symbolic residual and zero.  Equalities are
+represented by the branch equations; restrictions represent only non-equality
+relations used to describe a branch cell.
+"""
+struct SymbolicRestriction
+    residual::Symbolics.Num
+    relation::Symbol
+
+    function SymbolicRestriction(residual, relation)
+        relation_symbol = relation isa Symbol ? relation : Symbol(string(relation))
+        relation_symbol in (Symbol("!="), :>, Symbol(">="), :<, Symbol("<=")) ||
+            throw(ArgumentError("unsupported symbolic restriction relation: $relation"))
+        new(wrap(residual), relation_symbol)
+    end
+end
+
+const _restriction_relations = (Symbol("!="), :>, Symbol(">="), :<, Symbol("<="))
+
+function _restriction_operator(restriction::SymbolicRestriction)
+    relation = restriction.relation
+    relation === Symbol("!=") && return !=
+    relation === :> && return >
+    relation === Symbol(">=") && return >=
+    relation === :< && return <
+    relation === Symbol("<=") && return <=
+end
+
+function _restriction_expression(restriction::SymbolicRestriction)
+    _restriction_operator(restriction)(restriction.residual, 0)
+end
+
+function _normalize_restriction(restriction::SymbolicRestriction)
+    SymbolicRestriction(simplify(restriction.residual), restriction.relation)
 end
 
 Base.length(domain::SymbolicDomain) = length(domain.pairs)
@@ -83,8 +121,7 @@ struct FactorStep <: DerivationStep
     branch_index::Union{Nothing,Int}
 end
 
-mutable struct DiffEqBranch{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symbolics.Num},P<:AbstractVector{<:Symbolics.Num},E<:AbstractVector{<:Symbolics.Equation},B<:AbstractVector{<:Symbolics.Equation},T<:AbstractVector}
-    identifier::Int
+mutable struct DiffEqBranch{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symbolics.Num},P<:AbstractVector{<:Symbolics.Num},E<:AbstractVector{<:Symbolics.Equation},B<:AbstractVector{<:Symbolics.Equation}}
     name::String
     ivs::I
     dvs::D
@@ -93,8 +130,7 @@ mutable struct DiffEqBranch{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector
     bcs::B
     domain::SymbolicDomain
     domain_set::Union{Nothing,Tuple{<:AbstractVector{<:IntervalBoxes.IntervalBox},<:AbstractVector{<:IntervalBoxes.IntervalBox}}}
-    restrictions::T
-    # restrictions stores things like dv != 0, so when checking if allowed to divide by a dv the system first checks restrictions, and only if the relevant restriction is missing it splits into branches, in which the relevant restrictions are applied
+    restrictions::Vector{SymbolicRestriction}
     history::DerivationHistory
 end
 
@@ -108,53 +144,45 @@ function Base.setproperty!(sys::DiffEqBranch, name::Symbol, value)
     setfield!(sys, name, value)
 end
 
-function DiffEqBranch(eqs, bcs, domain, ivs, dvs; identifier=0, ps=Symbolics.Num[], name=:system,
-    domain_set=nothing, trivial_solutions=Any[], history=DerivationHistory())
+function DiffEqBranch(eqs, bcs, domain, ivs, dvs; ps=Symbolics.Num[], name=:system,
+    domain_set=nothing, restrictions=SymbolicRestriction[],
+    history=DerivationHistory())
     normalized_ivs = Symbolics.Num[ivs...]
     normalized_dvs = Symbolics.Num[dvs...]
     normalized_ps = Symbolics.Num[ps...]
     normalized_eqs = Symbolics.Equation[eqs...]
     normalized_bcs = Symbolics.Equation[bcs...]
     normalized_domain = domain isa SymbolicDomain ? domain : SymbolicDomain(domain)
-    DiffEqBranch(identifier, String(name), normalized_ivs, normalized_dvs, normalized_ps,
+    normalized_restrictions = SymbolicRestriction[restrictions...]
+    DiffEqBranch(String(name), normalized_ivs, normalized_dvs, normalized_ps,
         normalized_eqs, normalized_bcs, normalized_domain, domain_set,
-        trivial_solutions, history)
+        normalized_restrictions, history)
 end
 
 function DiffEqBranch(; eqs, ivs, dvs, ps=Symbolics.Num[], bcs=Symbolics.Equation[],
-    domain=Pair[], name=:system, domain_set=nothing, trivial_solutions=Any[],
-    history=DerivationHistory(), identifier=0)
-    DiffEqBranch(eqs, bcs, domain, ivs, dvs; identifier=identifier, ps=ps, name=name,
-        domain_set=domain_set, trivial_solutions=trivial_solutions,
+    domain=Pair[], name=:system, domain_set=nothing,
+    restrictions=SymbolicRestriction[], history=DerivationHistory())
+    DiffEqBranch(eqs, bcs, domain, ivs, dvs; ps=ps, name=name,
+        domain_set=domain_set, restrictions=restrictions,
         history=history)
 end
 
 """
 Collection of branches representing a union of solution sets.
 
-`seen` stores structural fingerprints, not derivation history.  This makes
-duplicate suppression independent of how a branch was reached and naturally
-collapses repeated factors such as `A^3 * B^2` into the distinct branches
-`A = 0` and `B = 0`.
+Branch generation is responsible for maintaining disjoint partition cells.
+No global duplicate set is kept: a branch's inherited restrictions are part of
+the logical cell it represents.
 """
 mutable struct DiffEqSystem
     branches::Vector{DiffEqBranch}
     pending::Stack{DiffEqBranch} #I think I want to move the pending field
     completed::Vector{DiffEqBranch}
-    seen::Set{UInt}
 end
 
 function DiffEqSystem(branches::Vector{<:DiffEqBranch}=DiffEqBranch[])
     normalized = DiffEqBranch[branches...]
-    system = DiffEqSystem(normalized, Stack{DiffEqBranch}(),
-        DiffEqBranch[], Set{UInt}())
-    for branch in normalized
-        branch.identifier == 0 &&
-            (branch.identifier = reinterpret(Int, hash((branch.eqs, branch.bcs,
-                branch.domain.pairs))))
-        push!(system.seen, _branch_fingerprint(branch))
-    end
-    system
+    DiffEqSystem(normalized, Stack{DiffEqBranch}(), DiffEqBranch[])
 end
 
 function DiffEqSystem(eqs, bcs, domain, ivs, dvs; kwargs...)
@@ -162,12 +190,11 @@ function DiffEqSystem(eqs, bcs, domain, ivs, dvs; kwargs...)
 end
 
 function DiffEqSystem(; eqs, ivs, dvs, ps=Symbolics.Num[], bcs=Symbolics.Equation[],
-    domain=Pair[], name=:system, domain_set=nothing, trivial_solutions=Any[],
-    history=DerivationHistory(), identifier=0)
+    domain=Pair[], name=:system, domain_set=nothing,
+    restrictions=SymbolicRestriction[], history=DerivationHistory())
     DiffEqSystem([DiffEqBranch(eqs=eqs, ivs=ivs, dvs=dvs, ps=ps, bcs=bcs,
         domain=domain, name=name, domain_set=domain_set,
-        trivial_solutions=trivial_solutions, history=history,
-        identifier=identifier)])
+        restrictions=restrictions, history=history)])
 end
 
 DiffEqSystem() = DiffEqSystem(DiffEqBranch[])
@@ -188,12 +215,12 @@ function _replace_branch!(
     branch.bcs = typeof(branch.bcs)(bcs)
     branch.domain = domain
     branch.history = history
-    branch.restrictions = restrictions
+    branch.restrictions = SymbolicRestriction[restrictions...]
     branch
 end
 
 function Base.getproperty(system::DiffEqSystem, name::Symbol)
-    name in (:branches, :pending, :completed, :seen) &&
+    name in (:branches, :pending, :completed) &&
         return getfield(system, name)
     length(system.branches) == 1 ||
         throw(ArgumentError("$(name) is branch-specific; select a branch first"))
@@ -201,7 +228,7 @@ function Base.getproperty(system::DiffEqSystem, name::Symbol)
 end
 
 function Base.setproperty!(system::DiffEqSystem, name::Symbol, value)
-    name in (:branches, :pending, :completed, :seen) &&
+    name in (:branches, :pending, :completed) &&
         return setfield!(system, name, value)
     length(system.branches) == 1 ||
         throw(ArgumentError("$(name) is branch-specific; select a branch first"))
@@ -212,33 +239,7 @@ Base.length(system::DiffEqSystem) = length(system.branches)
 Base.getindex(system::DiffEqSystem, index::Int) = system.branches[index]
 Base.iterate(system::DiffEqSystem, state...) = iterate(system.branches, state...)
 
-#this needs to be redone with actual logic that will have same branches be hashed the same. it can't fail on semantic differences in the names of variables
-function _branch_fingerprint(branch::DiffEqBranch)
-    hash((branch.ivs, branch.dvs, branch.ps, branch.eqs, branch.bcs,
-        branch.domain.pairs, branch.restrictions))
-end
-
-function _canonicalize_branch!(branch::DiffEqBranch)
-    for eq in branch.ps
-        eq = eq.lhs-eq.rhs~0
-    end
-    sorted_eqs = sort(branch.eqs.lhs-branch.eqs.rhs, by=string)
-    sorted_bcs = sort(branch.bcs, by=string)
-    sorted_ivs = sort(branch.ivs, by=string)
-    sorted_dvs = sort(branch.dvs, by=string)
-    sorted_ps = sort(branch.ps, by=string)
-    canonical_identifier = hash((branch.ivs, branch.dvs, branch.ps, branch.eqs, branch.bcs))
-    _replace_branch!(branch, sorted_eqs, sorted_ivs, sorted_dvs, sorted_ps, sorted_bcs, branch.domain, branch.history)
-end
-
-
 function push_branch!(system::DiffEqSystem, branch::DiffEqBranch)
-    branch.identifier == 0 &&
-        (branch.identifier = reinterpret(Int, hash((branch.eqs, branch.bcs,
-            branch.domain.pairs))))
-    fingerprint = _branch_fingerprint(branch)
-    fingerprint in system.seen && return false
-    push!(system.seen, fingerprint)
     push!(system.pending, branch)
     true
 end
@@ -247,9 +248,6 @@ function complete_branch!(system::DiffEqSystem, branch::DiffEqBranch)
     push!(system.completed, branch)
     branch
 end
-
-# TODO: add canonical expression/domain normalization to `_branch_fingerprint`
-# so mathematically identical but structurally reordered branches also merge.
 
 const cache_size = Ref{Int64}(1024)
 
