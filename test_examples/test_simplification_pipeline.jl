@@ -22,7 +22,7 @@ result = simplify_system(system)
 @test result.branches[1].history.steps isa Vector{DerivationStep}
 @test length(result.branches[1].history.steps) == 1
 @test only(result.branches[1].history.steps).options ==
-    SimplificationOptions()
+    SimplificationOptions()#needs modification before running again as SimplificationOptions was deprecated
 
 dependent_factor = DiffEqSystem(
     [u * u ~ 0],
@@ -39,7 +39,7 @@ dependent_result = simplify_system(dependent_factor)
 
 duplicate_union = DiffEqSystem()
 @test push_branch!(duplicate_union, DiffEqBranch(
-    [u ~ 0], Symbolics.Equation[], [x => [x > 0]], [x], [u])) 
+    [u ~ 0], Symbolics.Equation[], [x => [x > 0]], [x], [u]))
 @test !push_branch!(duplicate_union, DiffEqBranch(
     [u ~ 0], Symbolics.Equation[], [x => [x > 0]], [x], [u]))
 @test length(duplicate_union.pending) == 1

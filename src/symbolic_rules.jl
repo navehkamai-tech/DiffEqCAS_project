@@ -1,3 +1,6 @@
+# replace built in floating points with symbolic variables for essential constants
+@variables π e #what else?...
+
 # Rules are grouped by required assumptions and pipeline stage.  The
 # simplification pipeline can later select a safe group without enabling
 # branch-sensitive identities globally.
@@ -34,8 +37,8 @@ const TRIGONOMETRIC_RULES = [
     @rule(tan(~x) => sin(~x)/cos(~x))
 ]
 const SYMBOLIC_RULE_GROUPS = (
-    function_arguments = vcat(EXP_LOG_RULES, TRIGONOMETRIC_RULES),
-    positive_domain = vcat(POWER_RULES, ABSOLUTE_VALUE_RULES),
+    function_arguments=vcat(EXP_LOG_RULES, TRIGONOMETRIC_RULES),
+    positive_domain=vcat(POWER_RULES, ABSOLUTE_VALUE_RULES),
 )
 
 # TODO: Build stage-specific rewriters from SYMBOLIC_RULE_GROUPS.  Predicates

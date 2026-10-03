@@ -12,7 +12,7 @@ import Symbolics: unwrap, wrap, jacobian, simplify, substitute
 import SymbolicUtils: maketerm, @rule, @acrule
 
 export SymbolicDomain, domain_variables, domain_components, DiffEqSystem, DiffEqBranch, push_branch!, complete_branch!, DerivationStep, DerivationHistory, CoordTransformStep, ParamTransformStep, DepVarTransformStep, FactorStep, change_dvs!, change_ivs!, change_parameters!, change_dvs, change_ivs, change_parameters, group_coefficients, common_divisors, factor_divisibility, custom_rewrite, get_base_op, get_sign, Dirac, Heaviside, Restrict, SPECIAL_REWRITER
-export SimplificationOptions, SimplificationStep, simplify_system
+export SimplificationStep, simplify_system
 
 # 1. Foundational helpers
 include("base.jl")

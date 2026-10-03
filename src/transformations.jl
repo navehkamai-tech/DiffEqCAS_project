@@ -1,23 +1,4 @@
 
-# Replace a branch's state without replacing the branch object stored by its
-# parent system.  This also preserves branch-local metadata not involved in
-# the transformation.
-function _replace_branch!(
-    branch::DiffEqBranch;
-    eqs, ivs, dvs, ps, bcs, domain, history,
-)
-    # Constructors used to perform this conversion implicitly.  Keep it here
-    # because transformed intermediate collections may have eltype `Any`.
-    branch.eqs = typeof(branch.eqs)(eqs)
-    branch.ivs = typeof(branch.ivs)(ivs)
-    branch.dvs = typeof(branch.dvs)(dvs)
-    branch.ps = typeof(branch.ps)(ps)
-    branch.bcs = typeof(branch.bcs)(bcs)
-    branch.domain = domain
-    branch.history = history
-    branch
-end
-
 function _refresh_seen!(system::DiffEqSystem)
     empty!(system.seen)
     for branch in system.branches
