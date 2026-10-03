@@ -1,10 +1,9 @@
 
-function _refresh_seen!(system::DiffEqSystem)
-    empty!(system.seen)
-    for branch in system.branches
-        push!(system.seen, _branch_fingerprint(branch))
-    end
-    system
+function _transform_restrictions(restrictions, transform)
+    SymbolicRestriction[
+        SymbolicRestriction(transform(restriction.residual), restriction.relation)
+        for restriction in restrictions
+    ]
 end
 
 # Change parameters in place.  The return value is intentional: it supports
@@ -17,7 +16,12 @@ function change_parameters!(sys::DiffEqBranch, param_mapping::Dict)
 
     # Pass 2: Extract NEW parameters directly from the expressions
     # Leveraging your ability to pass Symbolics.Num directly into the tuple
-    exprs_tuple = Tuple(vcat(substituted_eqs, substituted_bcs_lhs, substituted_bcs_rhs))
+    substituted_restrictions = [
+        wrap(substitute(restriction.residual, param_mapping))
+        for restriction in sys.restrictions
+    ]
+    exprs_tuple = Tuple(vcat(substituted_eqs, substituted_bcs_lhs,
+        substituted_bcs_rhs, substituted_restrictions))
     new_params = extract_parameters(exprs_tuple)
 
     transformed_eqs = Symbolics.Equation[]
@@ -29,11 +33,15 @@ function change_parameters!(sys::DiffEqBranch, param_mapping::Dict)
     for (slhs, srhs) in zip(substituted_bcs_lhs, substituted_bcs_rhs)
         push!(transformed_bcs, simplify(SPECIAL_REWRITER(slhs)) ~ simplify(SPECIAL_REWRITER(srhs)))
     end
+    transformed_restrictions = _transform_restrictions(
+        sys.restrictions,
+        residual -> simplify(SPECIAL_REWRITER(substitute(residual, param_mapping))))
     # *need to add a helper function for getting the new domains
     step = ParamTransformStep(
         param_mapping, sys.ps, new_params)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs,
         ps=new_params, bcs=transformed_bcs, domain=sys.domain,
+        restrictions=transformed_restrictions,
         history=append_derivation(sys.history, step))
 end
 
@@ -160,7 +168,8 @@ function change_ivs!(sys::DiffEqBranch, new_ivs::Vector{Symbolics.Num}, iv_mappi
     old_u = unwrap.(sys.ivs)
     new_u = unwrap.(new_ivs)
     dv_funcs = unique([get_base_op(unwrap(dv)) for dv in sys.dvs])
-    params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, iv_exprs)))
+    params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, iv_exprs,
+        [restriction.residual for restriction in sys.restrictions])))
 
     J_inv = compute_J_inv(iv_exprs, new_ivs)
     var_map = Dict(old_u .=> unwrap.(iv_exprs))
@@ -185,6 +194,11 @@ function change_ivs!(sys::DiffEqBranch, new_ivs::Vector{Symbolics.Num}, iv_mappi
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
+    transformed_restrictions = _transform_restrictions(
+        sys.restrictions,
+        residual -> simplify(SPECIAL_REWRITER(expand_derivatives(wrap(
+            custom_rewrite(unwrap(residual), var_map, J_inv, new_ivs,
+                old_u, new_u, dv_funcs))))))
 
     new_domains = transform_domains(sys.domain, iv_mapping, final_ivs)
 
@@ -193,6 +207,7 @@ function change_ivs!(sys::DiffEqBranch, new_ivs::Vector{Symbolics.Num}, iv_mappi
         iv_mapping, sys.ivs, new_ivs, J_inv)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs,
         ps=params, bcs=transformed_bcs, domain=new_domains,
+        restrictions=transformed_restrictions,
         history=append_derivation(sys.history, step))
 end
 
@@ -274,7 +289,8 @@ function change_dvs!(sys::DiffEqBranch, new_dvs::Vector{Symbolics.Num}, dv_mappi
     old_dvs = unwrap.(sys.dvs)
     u_dv_exprs = unwrap.(dv_exprs)
 
-    params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, dv_exprs)))
+    params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, dv_exprs,
+        [restriction.residual for restriction in sys.restrictions])))
 
     transformed_eqs = Symbolics.Equation[]
     for eq in sys.eqs
@@ -298,12 +314,17 @@ function change_dvs!(sys::DiffEqBranch, new_dvs::Vector{Symbolics.Num}, dv_mappi
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
+    transformed_restrictions = _transform_restrictions(
+        sys.restrictions,
+        residual -> simplify(SPECIAL_REWRITER(expand_derivatives(wrap(
+            substitute_dvs(unwrap(residual), old_dvs, u_dv_exprs, ivs))))))
 
     # Passing sys.params assuming you want to retain the original params block manually
     mapping = Dict(old_dvs .=> dv_exprs)
     step = DepVarTransformStep(mapping, sys.dvs, final_dvs)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs,
         ps=params, bcs=transformed_bcs, domain=sys.domain,
+        restrictions=transformed_restrictions,
         history=append_derivation(sys.history, step))
 end
 
@@ -311,21 +332,21 @@ end
 # branch while retaining the identity and bookkeeping of the system object.
 function change_parameters!(sys::DiffEqSystem, param_mapping::Dict)
     foreach(branch -> change_parameters!(branch, param_mapping), sys.branches)
-    _refresh_seen!(sys)
+    sys
 end
 
 function change_ivs!(
     sys::DiffEqSystem, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict,
 )
     foreach(branch -> change_ivs!(branch, new_ivs, iv_mapping), sys.branches)
-    _refresh_seen!(sys)
+    sys
 end
 
 function change_dvs!(
     sys::DiffEqSystem, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict,
 )
     foreach(branch -> change_dvs!(branch, new_dvs, dv_mapping), sys.branches)
-    _refresh_seen!(sys)
+    sys
 end
 
 # Keep the established names as mutating aliases.  Callers that need a
