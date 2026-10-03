@@ -15,20 +15,19 @@ struct SymbolicDomain
         normalized = Pair[]
         variables = Any[]
         for pair in pairs
-            if pair isa Symbolics.VarDomainPairing
-                pair = pair.variables => [pair]
-            end
             pair isa Pair || throw(ArgumentError("domain entries must be pairs of variables and constraints"))
             key, constraints = pair
             key_variables = key isa Tuple ? collect(key) : Any[key]
             isempty(key_variables) && throw(ArgumentError("domain keys cannot be empty"))
             constraints isa AbstractVector ||
                 throw(ArgumentError("domain constraints must be stored in a vector"))
+            sort!(key_variables, by=string)
             for variable in key_variables
                 any(isequal(variable), variables) || push!(variables, variable)
             end
             push!(normalized, key => collect(constraints))
         end
+        sort!(normalized, pair -> string(pair.key[begin]))
         new(normalized, variables)
     end
 end
@@ -94,9 +93,8 @@ mutable struct DiffEqBranch{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector
     bcs::B
     domain::SymbolicDomain
     domain_set::Union{Nothing,Tuple{<:AbstractVector{<:IntervalBoxes.IntervalBox},<:AbstractVector{<:IntervalBoxes.IntervalBox}}}
-    trivial_sols::T
-    # TODO: Replace `trivial_sols` with a branch-local record of factors
-    # already split out, so repeated factorization cannot create duplicates.
+    restrictions::T
+    # restrictions stores things like dv != 0, so when checking if allowed to divide by a dv the system first checks restrictions, and only if the relevant restriction is missing it splits into branches, in which the relevant restrictions are applied
     history::DerivationHistory
 end
 
@@ -174,6 +172,26 @@ end
 
 DiffEqSystem() = DiffEqSystem(DiffEqBranch[])
 
+# Replace a branch's state without replacing the branch object stored by its
+# parent system.  This also preserves branch-local metadata not involved in
+# the transformation.
+function _replace_branch!(
+    branch::DiffEqBranch;
+    eqs=branch.eqs, ivs=branch.ivs, dvs=branch.dvs, ps=branch.ps, bcs=branch.bcs, domain=branch.domain, history=branch.history, restrictions=branch.restrictions
+)
+    # Constructors used to perform this conversion implicitly.  Keep it here
+    # because transformed intermediate collections may have eltype `Any`.
+    branch.eqs = typeof(branch.eqs)(eqs)
+    branch.ivs = typeof(branch.ivs)(ivs)
+    branch.dvs = typeof(branch.dvs)(dvs)
+    branch.ps = typeof(branch.ps)(ps)
+    branch.bcs = typeof(branch.bcs)(bcs)
+    branch.domain = domain
+    branch.history = history
+    branch.restrictions = restrictions
+    branch
+end
+
 function Base.getproperty(system::DiffEqSystem, name::Symbol)
     name in (:branches, :pending, :completed, :seen) &&
         return getfield(system, name)
@@ -194,10 +212,25 @@ Base.length(system::DiffEqSystem) = length(system.branches)
 Base.getindex(system::DiffEqSystem, index::Int) = system.branches[index]
 Base.iterate(system::DiffEqSystem, state...) = iterate(system.branches, state...)
 
+#this needs to be redone with actual logic that will have same branches be hashed the same. it can't fail on semantic differences in the names of variables
 function _branch_fingerprint(branch::DiffEqBranch)
     hash((branch.ivs, branch.dvs, branch.ps, branch.eqs, branch.bcs,
-        branch.domain.pairs, branch.trivial_sols))
+        branch.domain.pairs, branch.restrictions))
 end
+
+function _canonicalize_branch!(branch::DiffEqBranch)
+    for eq in branch.ps
+        eq = eq.lhs-eq.rhs~0
+    end
+    sorted_eqs = sort(branch.eqs.lhs-branch.eqs.rhs, by=string)
+    sorted_bcs = sort(branch.bcs, by=string)
+    sorted_ivs = sort(branch.ivs, by=string)
+    sorted_dvs = sort(branch.dvs, by=string)
+    sorted_ps = sort(branch.ps, by=string)
+    canonical_identifier = hash((branch.ivs, branch.dvs, branch.ps, branch.eqs, branch.bcs))
+    _replace_branch!(branch, sorted_eqs, sorted_ivs, sorted_dvs, sorted_ps, sorted_bcs, branch.domain, branch.history)
+end
+
 
 function push_branch!(system::DiffEqSystem, branch::DiffEqBranch)
     branch.identifier == 0 &&
@@ -217,7 +250,6 @@ end
 
 # TODO: add canonical expression/domain normalization to `_branch_fingerprint`
 # so mathematically identical but structurally reordered branches also merge.
-working_systems = Stack{DiffEqSystem}()
 
 const cache_size = Ref{Int64}(1024)
 

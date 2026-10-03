@@ -37,8 +37,12 @@ end
 # Canonicalize domain keys while preserving either the supplied IV order or
 # the first-seen order of the domain keys when no IV order is available.
 function _canonicalize_domain_pairs(domain_pairs, ivs=nothing)
+    #the SymbolicDomain constructor canonicalizes on it's own
+    if domain_pairs isa SymbolicDomain
+        return domain_pairs
+    end
     domain_pairs = _domain_pairs(domain_pairs)
-    variables = ivs === nothing ? Any[] : ivs
+    variables = ivs === nothing ? Any[] : sort(ivs, by=string)
     seen = ivs === nothing ? Set{Any}() : nothing
     groups = Vector{Tuple{Set{Any},Vector{Any}}}()
 
@@ -340,6 +344,6 @@ end
 add_domain_paving(sys::DiffEqSystem) = foreach(add_domain_paving, sys.branches)
 
 function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqSystem,
-                      include_boundary::Bool=true)
+    include_boundary::Bool=true)
     all(is_in_domain(coord, branch, include_boundary) for branch in sys.branches)
 end

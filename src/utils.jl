@@ -111,16 +111,6 @@ function get_base_op(expr)
     return expr
 end
 
-function simplify!(expr)
-    return Symbolics.simplify(expr)
-end
-function expand!(expr)
-    return Symbolics.expand(expr)
-end
-function expand_derivatives!(expr)
-    return Symbolics.expand_derivatives(expr)
-end
-
 #rules for stuff simplify doesn't handle well
 #symbolic rule util functions
 notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number

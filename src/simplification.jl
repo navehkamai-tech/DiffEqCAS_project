@@ -33,7 +33,7 @@ function _with_simplified_expressions(sys::DiffEqBranch, eqs, bcs)
         domain=sys.domain,
         name=sys.name,
         domain_set=sys.domain_set,
-        trivial_solutions=sys.trivial_sols,
+        trivial_solutions=sys.restrictions,
         history=sys.history,
     )
 end
@@ -193,7 +193,7 @@ function _simplify_one_system(sys::DiffEqBranch, options::SimplificationOptions)
             identifier=sys.identifier,
             eqs=current.eqs, ivs=current.ivs, dvs=current.dvs, ps=current.ps,
             bcs=current.bcs, domain=current.domain, name=current.name,
-            domain_set=current.domain_set, trivial_solutions=current.trivial_sols,
+            domain_set=current.domain_set, trivial_solutions=current.restrictions,
             history=append_derivation(sys.history,
                 SimplificationStep(options)),
         )
@@ -222,4 +222,18 @@ function simplify_system(sys::DiffEqSystem;
         _simplify_one_system(branch, options)
         for branch in sys.branches
     ])
+end
+
+function _canonicalize_branch!(branch::DiffEqBranch)
+    # TODO: add the logic that canonicalizes a DiffEqBranch, meaning the order of the vector fields eqs, bcs, ivs, dvs, ps, and that within eqs and bcs the objects themselves are normalized 
+    for eq in branch.ps
+        eq = eq.lhs-eq.rhs~0
+    end
+    sorted_eqs = sort(branch.eqs.lhs-branch.eqs.rhs, by=string)
+    sorted_bcs = sort(branch.bcs, by=string)
+    sorted_ivs = sort(branch.ivs, by=string)
+    sorted_dvs = sort(branch.dvs, by=string)
+    sorted_ps = sort(branch.ps, by=string)
+
+    _replace_branch!(branch, sorted_eqs, sorted_ivs, sorted_dvs, sorted_ps, sorted_bcs, branch.domain, branch.history)
 end
