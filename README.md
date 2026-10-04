@@ -12,15 +12,21 @@ Furthermore, `DiffEqCAS` is designed to be used in tandem with numerical methods
 
 ## Core Features
 
-Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingToolkit.jl`, and `SymbolicUtils.jl`), `DiffEqCAS` provides high-level tools to manipulate `ModelingToolkit.DiffEqSystem`s.
+Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingToolkit.jl`, and `SymbolicUtils.jl`), `DiffEqCAS` provides high-level tools to manipulate its own custom `DiffEqSystem` representations, which are designed to support branching and derivation history.
 
-- **Transformations and Substitutions**: Easily perform coordinate transformations and variable substitutions on entire PDE systems.
+- **System and Branch Tracking**:
+  - `DiffEqSystem` encapsulates equations, domain, and dependent/independent variables across potentially multiple branches of solutions.
+  - `DiffEqBranch` and `SymbolicRestriction` store branch-specific equations, domains, derivation history, and restrictions.
+  - `DerivationHistory` meticulously records transformations, variable changes, and simplifications that led to a specific branch.
+- **Transformations and Substitutions**: Easily perform coordinate transformations and variable substitutions on entire PDE systems. Both non-mutating (e.g., `change_ivs`) and in-place mutating (e.g., `change_ivs!`) versions are provided.
   - `change_ivs`: Transform independent variables (e.g., Cartesian to Polar coordinates).
   - `change_dvs`: Substitute or transform dependent variables.
   - `change_parameters`: Substitute parameters within systems.
-- **Simplification and Manipulation**:
+- **Simplification, Manipulation, and Divisibility**:
+  - `simplify_system`: Run a robust simplification pipeline on entire systems and branches.
   - `group_coefficients`: Group terms in equations by derivatives or dependent variables.
   - `custom_rewrite`: Advanced rewriting traversing expression trees.
+  - `factor_divisibility` and `common_divisors`: Utilities for factor splitting and identifying divisibility amongst complex symbolic expressions.
 - **Special Functions and Domains**:
   - Support for generalized functions in differential equations, such as `Dirac` and `Heaviside`.
   - `Restrict`: Handle domain restrictions.
@@ -35,11 +41,16 @@ Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingTo
 ```julia
 using DiffEqCAS
 
+# Core Structures
+DiffEqSystem, DiffEqBranch, SymbolicDomain, SymbolicRestriction, domain_variables, domain_components, push_branch!, complete_branch!
+DerivationStep, DerivationHistory, CoordTransformStep, ParamTransformStep, DepVarTransformStep, FactorStep, SimplificationStep
+
 # Transformation functions
+change_dvs!, change_ivs!, change_parameters!
 change_dvs, change_ivs, change_parameters
 
-# Simplification
-group_coefficients, custom_rewrite
+# Simplification and Divisibility
+simplify_system, group_coefficients, custom_rewrite, common_divisors, factor_divisibility
 
 # Utilities
 get_base_op, get_sign
@@ -50,10 +61,12 @@ Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 
 ## Structure
 
+- `src/base.jl`: Core structures for `DiffEqSystem`, `DiffEqBranch`, `SymbolicDomain`, and history tracking.
 - `src/utils.jl`, `src/domains.jl`: Foundational helpers and domain management.
 - `src/symbolic_rules.jl`: Core symbolic logic and rewrite rules.
-- `src/simplification.jl`, `src/units.jl`, `src/display.jl`: Modules for simplification, unit handling, and display.
-- `src/transformations.jl`, `src/special_algorithms.jl`: High-level operations for DiffEqSystem transformations and specialized algorithms (currently essentially empty, but planned to employ advanced simplification methods relying on symmetry and integration techniques).
+- `src/divisibility.jl`: Architectures for factor splitting and divisibility.
+- `src/simplification.jl`, `src/units.jl`, `src/display.jl`: Modules for simplification pipelines, unit handling, and display.
+- `src/transformations.jl`, `src/special_algorithms.jl`: High-level operations for transformations and specialized algorithms (currently essentially empty, but planned to employ advanced simplification methods relying on symmetry and integration techniques).
 
 ## Testing and Examples
 
