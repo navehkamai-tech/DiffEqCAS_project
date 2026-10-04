@@ -233,15 +233,15 @@ The useful question for the local collector is:
 Use the following mutually exclusive primary classes relative to a selected
 generator set:
 
-| Class | Meaning | Example | Local treatment |
-| --- | --- | --- | --- |
-| `generator_free` | Contains none of the selected generators | `a(x, u)` when only `u'` and `u''` are selected | Treat as a coefficient for those generators |
-| `affine` | Polynomial degree at most one in the selected generator(s) | `a(x)u'' + b(x)` | Collect with polynomial coefficient extraction |
-| `polynomial_nonlinear` | Polynomial degree two or greater in a selected generator | `(u'')^2 + u'u''` | Collect powers and monomials; do not call it linear |
-| `rational` | Contains selected generators in a quotient or negative power | `u''/(1+u')` | Preserve rational structure or use a rational-function routine |
-| `algebraic_nonpolynomial` | Uses roots or other algebraic operations not represented as a polynomial | `sqrt(u')u''` | Preserve as an algebraic atom unless an algebraic routine is enabled |
-| `transcendental` | Uses selected generators inside `exp`, `log`, `sin`, `abs`, or another non-polynomial function | `exp(u')`, `sin(u'')` | Preserve the function application as a nonlinear differential atom |
-| `opaque` | The traversal cannot safely classify the operation | a custom symbolic function of `u'` | Preserve it unchanged and report the unsupported structure |
+| Class            | Meaning                                                                                        | Example                                         | Local treatment                                                      |
+| ---------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- |
+| `free`           | Contains none of the selected generators                                                       | `a(x, u)` when only `u'` and `u''` are selected | Treat as a coefficient for those generators                          |
+| `affine`         | Polynomial degree at most one in the selected generator(s)                                     | `a(x)u'' + b(x)`                                | Collect with polynomial coefficient extraction                       |
+| `polynomial`     | Polynomial degree two or greater in a selected generator                                       | `(u'')^2 + u'u''`                               | Collect powers and monomials; do not call it linear                  |
+| `rational`       | Contains selected generators in a quotient or negative power                                   | `u''/(1+u')`                                    | Preserve rational structure or use a rational-function routine       |
+| `algebraic`      | Uses roots or other algebraic operations not represented as a polynomial                       | `sqrt(u')u''`                                   | Preserve as an algebraic atom unless an algebraic routine is enabled |
+| `transcendental` | Uses selected generators inside `exp`, `log`, `sin`, `abs`, or another non-polynomial function | `exp(u')`, `sin(u'')`                           | Preserve the function application as a nonlinear differential atom   |
+| `opaque`         | The traversal cannot safely classify the operation                                             | a custom symbolic function of `u'`              | Preserve it unchanged and report the unsupported structure           |
 
 `affine` is the precise meaning of “linear” here: it includes a constant
 remainder and coefficients that may depend on non-selected expressions. A
@@ -250,10 +250,10 @@ term can be affine in `u''` while its coefficient is transcendental in
 generators occurring anywhere in the term.
 
 ```julia
-@enum DifferentialDependenceKind generator_free affine polynomial_nonlinear \
-    rational algebraic_nonpolynomial transcendental opaque
+@enum DiffTermKind free affine polynomial rational \
+    algebraic transcendental opaque
 
-struct DifferentialTerm
+struct DiffTerm
     expression::Symbolics.Num
     dependence::DifferentialDependenceKind
     generators::Vector{Symbolics.Num}
@@ -262,7 +262,7 @@ struct DifferentialTerm
 end
 ```
 
-`degree` is populated only for `affine` and `polynomial_nonlinear` terms. It
+`degree` is populated only for `affine` and `polynomial` terms. It
 is not an attempted approximation for transcendental, rational, algebraic, or
 opaque terms.
 
