@@ -121,6 +121,40 @@ struct SimplificationStep <: DerivationStep
 end
 ```
 
+The two pass limits have different scopes:
+
+- `max_passes` limits the **local fixed-point loop** for one branch. A local
+  pass runs the ordered equation stages (derivative expansion, arithmetic
+  normalization, collection, coefficient simplification, structural rewrites,
+  and canonicalization). The local loop repeats only when one of those stages
+  changes an equation and the changed form could expose more local work.
+- `max_system_passes` limits the **outer system-reduction loop**. One system
+  pass discovers and applies relationships between equations in a branch, then
+  reruns local and assumption-aware simplification on the affected branches.
+  A new system pass is needed only if that cleanup exposes another
+  substitution, redundancy, or elimination relation.
+
+They must not be combined into one counter. For example, a substitution can
+create an expression that needs three local passes without requiring a second
+system pass; conversely, a system pass can change several equations even when
+each changed equation reaches its local fixed point in one pass. With
+`enable_system_reduction=false`, `max_system_passes` has no effect. With
+system reduction enabled, `max_passes` still applies to every local
+normalization invoked before, during, and after each system pass.
+
+The other limits have similarly different scopes:
+
+- `max_nodes` is the maximum accepted expression size for ordinary local or
+  post-reduction expressions.
+- `max_derivative_nodes` is the stricter limit for the temporary result of
+  derivative expansion, which is especially prone to combinatorial growth.
+- `max_branches` limits the number of solution-set branches after
+  assumption-aware splitting.
+
+If a limit is reached, the current transformation is rejected or the last
+stable result is returned. A limit must never cause equations, branches, or
+history entries to be silently dropped.
+
 The exact field names can change during implementation, but the relationship
 must remain: one options value describes one complete call to
 `simplify_system`, and one `SimplificationStep` records that call. Stage-level
@@ -183,45 +217,86 @@ Do not make “solved for the highest derivative” the default. Solving can
 introduce denominator conditions, fail for implicit or nonlinear equations, and
 choose a representation that is useful to a solver but not universally simpler.
 
-### 2.2 Differential generators and nonlinear differential atoms
+### 2.2 Differential generators and dependence classes
 
 A differential generator is a dependent variable or derivative selected for
-collection, such as `u`, `D(u)`, or a mixed derivative. Not every expression
-containing a generator is polynomial in that generator:
+collection, such as `u`, `D(u)`, or a mixed derivative. Classification must
+always state **which generators are being considered**. An expression can be
+linear in `u''` while still depending nonlinearly on `u'`, so “linear” and
+“nonlinear” are not reliable global labels by themselves.
 
-```text
-a(x) * u''       polynomial generator term
-exp(u')          nonlinear differential atom
-sin(u') * u''    coefficient relative to u'', but not derivative-free
-```
+The useful question for the local collector is:
 
-The collector therefore needs a small structural classification, not a
-blind call to polynomial `degree` and `coeff`:
+> How does this term depend on the selected differential generators, and what
+> operations are safe for that dependence?
+
+Use the following mutually exclusive primary classes relative to a selected
+generator set:
+
+| Class | Meaning | Example | Local treatment |
+| --- | --- | --- | --- |
+| `generator_free` | Contains none of the selected generators | `a(x, u)` when only `u'` and `u''` are selected | Treat as a coefficient for those generators |
+| `affine` | Polynomial degree at most one in the selected generator(s) | `a(x)u'' + b(x)` | Collect with polynomial coefficient extraction |
+| `polynomial_nonlinear` | Polynomial degree two or greater in a selected generator | `(u'')^2 + u'u''` | Collect powers and monomials; do not call it linear |
+| `rational` | Contains selected generators in a quotient or negative power | `u''/(1+u')` | Preserve rational structure or use a rational-function routine |
+| `algebraic_nonpolynomial` | Uses roots or other algebraic operations not represented as a polynomial | `sqrt(u')u''` | Preserve as an algebraic atom unless an algebraic routine is enabled |
+| `transcendental` | Uses selected generators inside `exp`, `log`, `sin`, `abs`, or another non-polynomial function | `exp(u')`, `sin(u'')` | Preserve the function application as a nonlinear differential atom |
+| `opaque` | The traversal cannot safely classify the operation | a custom symbolic function of `u'` | Preserve it unchanged and report the unsupported structure |
+
+`affine` is the precise meaning of “linear” here: it includes a constant
+remainder and coefficients that may depend on non-selected expressions. A
+term can be affine in `u''` while its coefficient is transcendental in
+`u'`. The classification must therefore also retain the set of differential
+generators occurring anywhere in the term.
 
 ```julia
-@enum DifferentialTermKind polynomial_term nonlinear_atom ordinary_term
+@enum DifferentialDependenceKind generator_free affine polynomial_nonlinear \
+    rational algebraic_nonpolynomial transcendental opaque
 
 struct DifferentialTerm
     expression::Symbolics.Num
-    kind::DifferentialTermKind
+    dependence::DifferentialDependenceKind
     generators::Vector{Symbolics.Num}
+    selected_generators::Vector{Symbolics.Num}
+    degree::Union{Nothing,Int}
 end
 ```
 
-`DifferentialTerm` is an analysis result for one expression, not an alternative
-system representation. It tells the local collector what it is allowed to do:
-collect polynomial occurrences and preserve nonlinear occurrences as opaque
-terms. The original Symbolics expression remains the source of truth.
+`degree` is populated only for `affine` and `polynomial_nonlinear` terms. It
+is not an attempted approximation for transcendental, rational, algebraic, or
+opaque terms.
 
-This is necessary for equations such as:
+This resolves the apparent conflict between earlier “linear/nonlinear/opaque”
+language and the more detailed classification. “Linear” is now the
+mathematical `affine` subclass of polynomial dependence; “nonlinear” is a
+description that includes `polynomial_nonlinear`, `rational`,
+`algebraic_nonpolynomial`, and `transcendental`; and “opaque” is reserved for
+expressions whose operation is unsupported, not for every nonlinear term.
+
+For example:
 
 ```text
 u'' + exp(u') = 0
-u_t + sin(u_x) = 0
 ```
 
-The simplifier should collect `u''` or `u_t` without pretending that the whole
-equation is a polynomial differential equation.
+contains an affine `u''` term and a transcendental atom in `u'`. It is not a
+polynomial differential equation as a whole, but the affine part can still be
+collected. Likewise:
+
+```text
+sin(u') * u'' + (u'')^2 = 0
+```
+
+has a coefficient that is transcendental in `u'`, an affine occurrence of
+`u''`, and a polynomial-nonlinear occurrence of `u''`. The collector may group
+by `u''`, but must not claim that the resulting coefficient is free of all
+differential generators.
+
+`DifferentialTerm` is an analysis result for one expression, not an
+alternative system representation. The original Symbolics expression remains
+the source of truth. The classification tells the local collector whether it
+may use polynomial `degree`/`coeff`, whether it needs a rational or algebraic
+backend, or whether it must preserve the subexpression as an atom.
 
 ### 2.3 Atom maps for polynomial regions
 
