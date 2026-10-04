@@ -1,521 +1,529 @@
-# DiffEqCAS Simplification Plan
+# Simplification plan
 
-This document is the implementation template for the simplification architecture
-of `DiffEqCAS`. It describes three layers with increasing semantic power:
+This document is the implementation template for simplification in
+`DiffEqCAS`. It is intentionally organized around the existing
+`DiffEqSystem`/`DiffEqBranch` architecture rather than around independent
+expression-processing utilities.
 
-1. **Layer 1: local equation simplification**
-2. **Layer 2: assumption-aware simplification**
-3. **Layer 3: system reduction**
+The planned simplifier has three layers:
 
-The layers are deliberately separate. A caller can request only safe local
-normalization, while higher layers may use domain facts, branch creation, or
-relationships between equations. Every higher layer may call the layers below
-it, but lower layers must not silently inspect or modify sibling equations.
+1. **Local equation simplification:** normalize each equation without using
+   sibling equations or changing its domain.
+2. **Assumption-aware simplification:** use the selected branch's domain and
+   restrictions to justify cancellations and branch-sensitive identities.
+3. **System reduction:** use relationships between equations to remove
+   redundancy, substitute, and eliminate.
 
-The target is not one universal "simplest" representation. The default
-representation is a deterministic residual equation:
+The layers are not three unrelated modes. They are nested operations on one
+`DiffEqSystem`:
 
 ```text
-canonical_residual ~ 0
+one DiffEqSystem
+    |
+    +-- for each branch:
+    |       local simplification
+    |       assumption-aware simplification
+    |
+    +-- system-wide relation discovery/reduction
+            |
+            +-- local simplification of changed equations
+            +-- assumption-aware simplification of changed branches
+            +-- repeat until the system is stable
 ```
 
-with derivatives and polynomial differential generators collected where valid,
-nonlinear differential subexpressions preserved as atoms, and all accepted
-domain changes recorded explicitly.
-
-## 1. Architecture and guarantees
-
-### 1.1 Layer responsibilities
-
-| Layer | Input context | Main result | Allowed semantic power |
-| --- | --- | --- | --- |
-| Local | One equation, its boundary condition, and branch metadata | Stable canonical residual | Algebraic rewrites that preserve the current equation on its current domain |
-| Assumption-aware | One branch plus `SymbolicDomain` and restrictions | Simplified branch, side conditions, or split branches | Nonzero cancellation and branch-sensitive identities only after proof |
-| System reduction | A complete `DiffEqSystem` | Equivalent reduced system or explicitly branched systems | Substitution, elimination, redundancy removal, and selected differential consequences |
-
-The implementation should expose separate public or semi-public entry points:
+The public operation remains:
 
 ```julia
-simplify_equation(eq, context; options...)
-simplify_branch(branch; options...)
-simplify_system(sys; options...)
+simplify_system(sys::DiffEqSystem; options=SimplificationOptions())
 ```
 
-`SimplificationOptions` can remain the common configuration object, but options
-should be grouped by capability rather than becoming unrelated boolean flags.
-Suggested groups are `LocalOptions`, `AssumptionOptions`, and
-`SystemReductionOptions`, with a convenience constructor for the normal profile.
+It accepts one system and returns one new `DiffEqSystem`. A system may contain
+multiple `DiffEqBranch` values because branches represent a union of solution
+sets, but the simplifier does not create a second independent system context.
 
-### 1.2 Core invariants
+## 1. Existing architecture and design decisions
 
-Every transformation must satisfy these invariants:
+### 1.1 `DiffEqSystem` is the orchestration boundary
 
-1. **Residual invariant:** equations are internally represented as
-   `lhs - rhs ~ 0`.
-2. **Metadata invariant:** independent variables, dependent variables,
-   parameters, boundary conditions, domains, restrictions, and history survive
-   every transformation.
-3. **Conservatism invariant:** unsupported expression structure is preserved,
-   not guessed at or replaced by a success-shaped fallback.
-4. **Domain invariant:** cancelling a factor or applying a branch-sensitive
-   identity requires a proof or creates a recorded side condition.
-5. **Termination invariant:** every loop has both a fixed-point test and a
-   resource bound.
-6. **Determinism invariant:** equivalent accepted inputs use stable ordering for
-   terms, factors, generators, equations, and metadata.
-7. **Traceability invariant:** transformations that change a branch or its
-   assumptions produce a `DerivationStep`.
+`DiffEqSystem` already owns:
 
-### 1.3 Shared data structures
+- the current `branches`;
+- pending and completed branch work;
+- duplicate suppression through `seen`;
+- iteration over branches;
+- construction from equations or branches.
 
-The current `DiffEqBranch`, `DiffEqSystem`, `SymbolicDomain`,
-`DerivationHistory`, and `SimplificationStep` are the foundation. The following
-records should be added or refined as implementation proceeds.
+Simplification should use that model instead of introducing a separate
+simplification context that duplicates system state. The system-level function
+coordinates the run, while branch-local helpers receive a selected
+`DiffEqBranch`.
+
+The simplifier should not mutate the caller's system. It should construct
+transformed branches, preserve branch metadata, and return a new
+`DiffEqSystem`. This matches the current `_with_simplified_expressions` and
+`_simplify_one_system` direction.
+
+### 1.2 `DiffEqBranch` is the unit of assumptions and history
+
+Each branch carries:
+
+- equations and boundary conditions;
+- independent variables, dependent variables, and parameters;
+- a `SymbolicDomain`;
+- interval/domain cache information;
+- restrictions/trivial-solution metadata;
+- a `DerivationHistory`.
+
+Assumption-aware transformations must operate on one branch at a time because
+nonzero facts and branch restrictions are branch-specific. System-wide
+reduction may compare several equations in one branch, but it must not use facts
+from one branch to rewrite another.
+
+### 1.3 `SimplificationOptions` configures one complete run
+
+`SimplificationOptions` should be the single configuration object for the
+entire simplification run. It is stored in `SimplificationStep`, which is
+appended to the history of every branch changed by that run. This connects:
+
+```text
+the requested behavior
+    -> the transformations performed
+    -> the branch history that records them
+```
+
+The options should describe policy and resource limits, not transient mutable
+state:
 
 ```julia
-struct SimplificationContext
-    branch::DiffEqBranch
-    generators::Vector{Symbolics.Num}
-    assumptions::AssumptionSet
-    atom_table::AtomTable
-    complexity::ComplexityBudget
+Base.@kwdef struct SimplificationOptions
+    max_passes::Int = 4
+    max_system_passes::Int = 4
+    max_branches::Int = 256
+    max_nodes::Int = 100_000
+    max_derivative_nodes::Int = 50_000
+
+    expand_derivatives::Bool = true
+    expand_products::Bool = true
+    collect_generators::Bool = true
+    enable_cancellation::Bool = true
+    enable_factorization::Bool = false
+    enable_function_rules::Bool = false
+    enable_system_reduction::Bool = false
+    enable_branch_splitting::Bool = false
+    enable_differential_consequences::Bool = false
+
+    normal_form::Symbol = :collected
+    reduction_strategy::Symbol = :conservative
 end
 
-struct AssumptionSet
+struct SimplificationStep <: DerivationStep
+    options::SimplificationOptions
+end
+```
+
+The exact field names can change during implementation, but the relationship
+must remain: one options value describes one complete call to
+`simplify_system`, and one `SimplificationStep` records that call. Stage-level
+details belong in diagnostics or specialized derivation steps, not in a
+second configuration object.
+
+Resource limits are included here because simplification can increase
+expression size or branch count. A limit is not a simplification result:
+when reached, the implementation keeps the last stable result and records a
+diagnostic rather than returning an incomplete success-shaped transformation.
+
+### 1.4 Results and diagnostics
+
+The normal public result is still `DiffEqSystem`. Internal helpers need
+structured results so a rejected or budget-limited transformation is visible:
+
+```julia
+struct SimplificationDiagnostics
+    warnings::Vector{Symbol}
+    rejected_rules::Vector{Symbol}
+    rejected_transformations::Vector{Any}
+    node_counts::Vector{Int}
+end
+
+struct BranchSimplificationResult
+    branch::DiffEqBranch
+    changed::Bool
+    diagnostics::SimplificationDiagnostics
+end
+```
+
+Diagnostics should normally be internal until a public reporting API is
+designed. They are still important: unsupported transcendental structure,
+unknown nonzero facts, and budget refusals must not look like successful
+rewrites.
+
+## 2. Normal forms and shared concepts
+
+### 2.1 Residual equations
+
+Every differential equation is processed through the residual:
+
+```julia
+_simplification_expression(eq::Symbolics.Equation) =
+    unwrap(eq.lhs - eq.rhs)
+```
+
+The internal target is:
+
+```text
+canonical residual ~ 0
+```
+
+This avoids arbitrary choices about which derivative to isolate and makes
+comparison, collection, and system reduction consistent. Boundary conditions
+remain left/right equations for metadata and display, but each side is locally
+normalized and their residual can be used for fingerprints.
+
+Do not make “solved for the highest derivative” the default. Solving can
+introduce denominator conditions, fail for implicit or nonlinear equations, and
+choose a representation that is useful to a solver but not universally simpler.
+
+### 2.2 Differential generators and nonlinear differential atoms
+
+A differential generator is a dependent variable or derivative selected for
+collection, such as `u`, `D(u)`, or a mixed derivative. Not every expression
+containing a generator is polynomial in that generator:
+
+```text
+a(x) * u''       polynomial generator term
+exp(u')          nonlinear differential atom
+sin(u') * u''    coefficient relative to u'', but not derivative-free
+```
+
+The collector therefore needs a small structural classification, not a
+blind call to polynomial `degree` and `coeff`:
+
+```julia
+@enum DifferentialTermKind polynomial_term nonlinear_atom ordinary_term
+
+struct DifferentialTerm
+    expression::Symbolics.Num
+    kind::DifferentialTermKind
+    generators::Vector{Symbolics.Num}
+end
+```
+
+`DifferentialTerm` is an analysis result for one expression, not an alternative
+system representation. It tells the local collector what it is allowed to do:
+collect polynomial occurrences and preserve nonlinear occurrences as opaque
+terms. The original Symbolics expression remains the source of truth.
+
+This is necessary for equations such as:
+
+```text
+u'' + exp(u') = 0
+u_t + sin(u_x) = 0
+```
+
+The simplifier should collect `u''` or `u_t` without pretending that the whole
+equation is a polynomial differential equation.
+
+### 2.3 Atom maps for polynomial regions
+
+Factorization and elimination need an explicit reversible mapping when a
+Symbolics expression contains functions or derivatives that a polynomial
+backend does not understand:
+
+```julia
+struct AtomTable
+    atoms::Vector{Symbolics.Num}
+    indices::Dict{Any,Int}
+end
+```
+
+`AtomTable` belongs to one transformation attempt. It maps selected
+expressions, such as `u''` or `exp(u')`, to temporary polynomial variables and
+maps the result back. It must never cause the system to claim an analytic
+identity that was only true after treating a transcendental expression as an
+independent algebraic atom.
+
+`Nemo.jl` is used only after this classification and mapping. Unsupported
+subexpressions remain atoms or are left untouched.
+
+## 3. Layer 1: local equation simplification
+
+### 3.1 Role and contract
+
+Local simplification transforms one equation using only:
+
+- the equation itself;
+- the selected branch's variable declarations;
+- unconditional symbolic rules;
+- the current local resource limits.
+
+It does not use another equation as a substitution rule, and it does not
+divide by a factor merely because the factor appears common. Its output is a
+locally equivalent equation or a classification as identity, contradiction, or
+parameter-only condition.
+
+The branch-level caller applies this operation to every `eqs` entry and every
+boundary-condition side.
+
+### 3.2 Pipeline
+
+```text
+branch
+  |
+  v
+normalize each equation to a residual
+  |
+  v
+expand derivatives, subject to node budget
+  |
+  v
+normalize arithmetic and selected products
+  |
+  v
+classify differential generators and nonlinear atoms
+  |
+  v
+collect valid generator powers
+  |
+  v
+simplify coefficients and ordinary subexpressions
+  |
+  v
+apply unconditional structural rules
+  |
+  v
+recollect and canonicalize
+  |
+  v
+classify identities and contradictions
+```
+
+The final recollection is intentional. Coefficient simplification can expose
+new common terms, and structural rules can expose new generator powers.
+
+### 3.3 Derivative expansion
+
+The existing `expand_derivatives` operation is the foundation for this stage.
+It exposes product and chain rules so later collection sees actual
+derivatives:
+
+```text
+D(a(x)u') -> a(x)u'' + a'(x)u'
+```
+
+The stage must:
+
+- expand only when `expand_derivatives` is enabled;
+- measure the candidate node count before accepting it;
+- preserve the previous expression if the derivative budget is exceeded;
+- use the project's convention for commuting mixed derivatives;
+- leave unsupported registered functions intact.
+
+Derivative expansion is done before generator collection because collection of
+an unexpanded derivative would miss terms produced by product and chain rules.
+It is not repeated unconditionally at every substage; the local loop calls a
+single stage and only repeats if a later rewrite created a new derivative
+expression.
+
+### 3.4 Arithmetic normalization
+
+Use `simplify` for general local cleanup and `expand` for selected algebraic
+regions when distribution is needed for collection:
+
+```julia
+expr = simplify(expr)
+options.expand_products && (expr = expand(expr))
+expr = simplify(expr)
+```
+
+The implementation should not expand transcendental arguments by default.
+`sin(a + b)` and `exp(a + b)` are normally preserved because function
+expansion can increase size and may not be a simplification for downstream
+consumers.
+
+The purpose of this stage is to expose additive terms and multiplicative
+factors. It is not to select the final factored or expanded display form;
+`normal_form` controls that final policy.
+
+### 3.5 Generator collection
+
+The current `group_coefficients` function is the starting point. It should be
+refactored into a branch-independent expression helper and extended with the
+classification above:
+
+```julia
+function _collect_generators(expr, branch, options)
+    generators = _differential_generators(branch)
+    terms = _classify_differential_terms(expr, generators)
+    grouped = _collect_polynomial_terms(terms, generators)
+    _recombine(grouped, terms)
+end
+```
+
+The helper receives the branch because `branch.dvs` and `branch.ivs` define
+which expressions count as dependent variables and independent variables.
+It does not use sibling equations; that is the boundary between local
+collection and system reduction.
+
+The collector must preserve:
+
+- powers of a generator;
+- mixed derivative generators;
+- coefficients that contain other differential generators;
+- nonlinear atoms such as `exp(u')` and `sin(u'')`;
+- unsupported terms in their original structural form.
+
+### 3.6 Coefficient simplification
+
+After collection, simplify the coefficient attached to each generator and the
+remainder. This is where `Symbolics.simplify`, `SPECIAL_REWRITER`, and the
+existing helper utilities do most of their work.
+
+A coefficient relative to `u''` is not necessarily free of `u'`. The local
+stage may simplify:
+
+```text
+(exp(u') + cos(u'))u''
+```
+
+but it must not treat that coefficient as an ordinary function of `x` when a
+later stage decides whether solving or cancellation is safe.
+
+No symbolic division by a potentially zero expression occurs here. That is the
+responsibility of Layer 2.
+
+### 3.7 Structural rules
+
+The existing `SPECIAL_REWRITER` is the initial structural rule set. It
+contains derivative ordering and registered special-function behavior. Layer 1
+may use rules that are unconditional under the project's declared symbolic
+semantics.
+
+The rule groups in `symbolic_rules.jl` are not all Layer 1 rules. Rules for
+logs, powers, absolute values, and trigonometric expressions can depend on
+sign, reality, integrality, or branch assumptions and therefore belong in
+Layer 2.
+
+### 3.8 Canonicalization and classification
+
+The final local pass should make equivalent accepted outputs deterministic:
+
+- residual on the left and `0` on the right;
+- stable additive-term order;
+- stable factor order;
+- stable differential-generator order;
+- normalized sign;
+- safe numeric content normalization;
+- stable function argument representation.
+
+The result must then be classified:
+
+```text
+0 ~ 0                 identity
+provably nonzero ~ 0  contradiction
+no dependent terms    parameter/domain condition
+otherwise             ordinary differential equation
+```
+
+The system-level caller decides whether to remove an identity, discard an
+inconsistent branch, or store a parameter/domain condition as a restriction.
+The local helper only reports the classification.
+
+### 3.9 Local pseudocode
+
+```julia
+function _simplify_equation_local(eq, branch, options)
+    residual = _simplification_expression(eq)
+    previous = nothing
+
+    for _ in 1:options.max_passes
+        previous = residual
+
+        if options.expand_derivatives
+            residual = _expand_derivatives_bounded(
+                residual, options.max_derivative_nodes)
+        end
+        residual = _normalize_arithmetic(residual, options)
+
+        if options.collect_generators
+            residual = _collect_generators(residual, branch, options)
+        end
+        residual = _simplify_coefficients(residual, branch, options)
+        residual = _apply_structural_rules(residual, branch, options)
+        residual = _canonicalize_residual(residual, branch, options)
+
+        _complexity(residual) <= options.max_nodes ||
+            return _local_result(previous, :budget_exceeded)
+        isequal(residual, previous) && break
+    end
+
+    _classify_local_result(residual, branch)
+end
+```
+
+`_simplify_branch_local` calls this helper for every equation and boundary
+condition, reconstructs a `DiffEqBranch` with the existing metadata, and
+returns diagnostics. It does not append history by itself; the outer
+`simplify_system` call appends one `SimplificationStep(options)` when the
+complete requested run changes the branch.
+
+## 4. Layer 2: assumption-aware simplification
+
+### 4.1 Role and contract
+
+Layer 2 is still branch-local, but it may use:
+
+- `branch.domain`;
+- `branch.restrictions`;
+- parameter metadata;
+- interval/domain caches;
+- facts proven during this simplification run.
+
+Its purpose is to perform transformations that are mathematically valid only
+under facts that are not visible from the expression alone. Examples include
+dividing by a factor, removing an absolute value, combining logarithms, and
+using some power identities.
+
+An unknown fact is not permission to rewrite. The result is either:
+
+```text
+proved transformation
+rejected transformation
+explicit branch split
+```
+
+### 4.2 Assumption state for one branch
+
+The branch already stores the source of assumptions. A proof cache can be
+introduced as an internal run-local object:
+
+```julia
+struct AssumptionState
     domain::SymbolicDomain
     restrictions::Vector{Any}
-    proven_facts::Vector{ProofFact}
+    facts::Dict{Any,ProofFact}
 end
 
 struct ProofFact
     proposition::Any
-    status::Symbol       # :proven, :disproven, or :unknown
+    status::Symbol       # :proven, :disproven, :unknown
     method::Symbol
     evidence::Any
 end
-
-struct FactorCandidate
-    expression::Symbolics.Num
-    multiplicity::Int
-    source::Symbol       # :numeric, :polynomial, :common_divisor, ...
-    proof::Union{Nothing,ProofFact}
-end
-
-struct DifferentialAtom
-    expression::Symbolics.Num
-    order::Int
-    kind::Symbol         # :generator, :nonlinear, :opaque
-end
-
-struct ComplexityBudget
-    max_nodes::Int
-    max_derivative_expansion_nodes::Int
-    max_local_passes::Int
-    max_system_passes::Int
-    max_branches::Int
-end
 ```
 
-`DifferentialAtom` is essential. A term such as `exp(u')` is not a polynomial
-in `u'`; it must remain an opaque nonlinear differential atom unless a
-specialized rule explicitly handles it.
-
-### 1.4 Shared helper interfaces
-
-The layers should share narrow helpers instead of duplicating symbolic logic:
-
-```julia
-_residual(eq) -> Symbolics.Num
-_as_equation(residual) -> Symbolics.Equation
-_collect_differential_generators(expr, generators)
-_classify_differential_structure(expr, generators)
-_normalize_equation_sides(eq, context)
-_canonical_fingerprint(expr_or_branch)
-_complexity(expr) -> Int
-_preserves_residual(candidate, original, context) -> Bool
-_prove_nonzero(expr, assumptions) -> ProofFact
-_make_branch(branch; equations, assumptions, step)
-```
-
-Use `Symbolics.unwrap` and `Symbolics.wrap` at API boundaries consistently.
-Use `SymbolicUtils.istree`, `operation`, and `arguments` for structural
-inspection, while preserving existing domain-specific utilities such as
-`expand_derivatives`, `SPECIAL_REWRITER`, `common_divisors`,
-`factor_divisibility`, and `group_coefficients`.
-
-## 2. Layer 1: local equation simplification
-
-### 2.1 Role and contract
-
-Layer 1 simplifies one equation without using other equations as facts and
-without changing its domain. It is the safe default for every input.
-
-Its contract is:
-
-```text
-simplify_equation(eq, context)
-    -> one equivalent canonical equation, or a classified identity/contradiction
-```
-
-The target is a collected residual, not necessarily a solved equation and not
-necessarily a permanently factored equation.
-
-### 2.2 Local pipeline
-
-```text
-input equation or boundary condition
-    |
-    v
-normalize to residual F = lhs - rhs
-    |
-    v
-expand derivatives under a complexity budget
-    |
-    v
-normalize arithmetic and distribute selected products
-    |
-    v
-classify differential generators and nonlinear differential atoms
-    |
-    v
-collect only valid polynomial generator occurrences
-    |
-    v
-simplify coefficients and ordinary subexpressions
-    |
-    v
-apply safe structural/special-function rewrites
-    |
-    v
-recollect and canonicalize
-    |
-    v
-classify identity, contradiction, or ordinary equation
-```
-
-Each stage must be independently callable and should return a result plus
-diagnostic metadata:
-
-```julia
-struct LocalStageResult
-    expression::Symbolics.Num
-    changed::Bool
-    warnings::Vector{Symbol}
-    rejected::Vector{Any}
-end
-```
-
-### 2.3 Stage A: residual normalization
-
-Convert every equation to one residual before doing symbolic work:
-
-```julia
-function _normalize_residual(eq)
-    simplify(unwrap(eq.lhs - eq.rhs))
-end
-```
-
-Do not solve for the highest derivative here. Solving introduces denominator
-conditions and is a representation choice for numerical or solver consumers,
-not a universally safe simplification.
-
-Normalize signs and sides only after the residual is formed. Boundary conditions
-may use a left/right representation for display, but their internal comparison
-should still use a residual fingerprint.
-
-### 2.4 Stage B: derivative expansion
-
-Use `Symbolics.expand_derivatives` to expose product and chain rules, but make
-expansion targeted and budgeted:
-
-```julia
-function _expand_derivatives_bounded(expr, budget)
-    candidate = expand_derivatives(wrap(expr))
-    _complexity(candidate) <= budget.max_derivative_expansion_nodes ?
-        unwrap(candidate) : expr
-end
-```
-
-Focus on:
-
-- product and chain rules;
-- mixed and higher derivatives;
-- registered derivative operators such as `Dirac` and `Heaviside`;
-- consistent ordering of commuting derivatives.
-
-Pitfalls:
-
-- repeated chain rules can cause combinatorial growth;
-- mixed derivative reordering requires a smoothness convention;
-- distributional objects may not obey classical derivative identities;
-- an unevaluated derivative may be preferable when expansion exceeds the budget.
-
-### 2.5 Stage C: arithmetic expansion and normalization
-
-Distribute multiplication only when it enables collection or cancellation.
-`Symbolics.simplify` and `Symbolics.expand` should be used as targeted tools,
-not as an unconditional expand/simplify loop.
-
-```julia
-expr = simplify(expr)
-expr = expand(expr)              # only for selected algebraic regions
-expr = simplify(expr)
-```
-
-Do not expand transcendental arguments by default. For example, expanding
-`sin(a + b)` is usually a growth operation, not a simplification.
-
-### 2.6 Stage D: differential structure classification
-
-Find derivatives and dependent-variable generators structurally. Then classify
-each expression:
-
-```text
-polynomial in selected generator
-nonlinear differential atom
-ordinary coefficient
-unsupported opaque expression
-```
-
-Examples:
-
-```text
-a(x) * u''                 polynomial generator term
-exp(u')                    nonlinear differential atom
-sin(u') * u''              coefficient relative to u'', but not ordinary
-a(x, u)                    coefficient if u is allowed as an algebraic atom
-Integral(..., u')          opaque unless a rule handles it
-```
-
-A collector must never call polynomial `degree` or `coeff` on an expression
-unless polynomiality in the selected atom set has been established.
-
-### 2.7 Stage E: generator collection
-
-Use `group_coefficients` as the starting implementation, but extend it with
-classification and fallback behavior:
-
-```julia
-function collect_generators(expr, generators)
-    polynomial_part, nonlinear_atoms, remainder =
-        _classify_differential_structure(expr, generators)
-    grouped = _collect_polynomial_part(polynomial_part, generators)
-    _recombine(grouped, nonlinear_atoms, remainder)
-end
-```
-
-Collection is relative to a generator. A coefficient of `u''` may contain
-`exp(u')`; it is not necessarily free of all differential generators. Preserve
-that distinction for later factorization and solving decisions.
-
-### 2.8 Stage F: coefficient simplification
-
-Simplify coefficients after collection and then collect once more. Coefficients
-may contain rational functions, ordinary variables, parameters, dependent
-variables, or nonlinear differential atoms.
-
-Use:
-
-- `Symbolics.simplify`;
-- `SymbolicUtils` tree traversal;
-- `Symbolics.cancel`/`factor` equivalents where available;
-- `Nemo` only for explicitly classified polynomial regions.
-
-Do not divide by a symbolic coefficient in Layer 1. Division is an
-assumption-aware operation and belongs in Layer 2.
-
-### 2.9 Stage G: structural rewrite rules
-
-Apply only unconditional or structurally safe rules:
-
-- derivative operator normalization;
-- registered `Dirac` and `Heaviside` rules with valid local semantics;
-- literal zero/one and constant arithmetic;
-- sign normalization;
-- safe function argument normalization.
-
-The existing `SPECIAL_REWRITER` is the initial structural rewrite layer.
-`SYMBOLIC_RULE_GROUPS` should be selected only after Layer 2 provides proofs.
-
-### 2.10 Stage H: canonicalization and classification
-
-The final local pass must produce a stable representation:
-
-```text
-residual ~ 0
-```
-
-Canonicalization should include:
-
-- stable ordering of additive terms and multiplicative factors;
-- stable ordering of differential generators by order and variable;
-- normalized sign;
-- removal of nonzero numeric content when it is unconditionally safe;
-- canonical function argument forms;
-- canonical equation-side placement.
-
-Classify the result:
-
-```julia
-@enum EquationStatus ordinary identity contradiction parameter_condition
-
-struct LocalEquationResult
-    equation::Union{Nothing,Symbolics.Equation}
-    status::EquationStatus
-    residual::Symbolics.Num
-    diagnostics::Vector{Any}
-end
-```
-
-`0 ~ 0` is an identity. A provably nonzero constant residual is a
-contradiction. A residual containing no dependent variables may be a branch
-condition rather than a differential equation.
-
-### 2.11 Layer 1 pseudocode
-
-```julia
-function simplify_equation(eq, context; options=LocalOptions())
-    residual = _normalize_residual(eq)
-    previous = nothing
-
-    for pass in 1:options.max_passes
-        previous = residual
-        residual = _expand_derivatives_bounded(residual, options.budget)
-        residual = _normalize_arithmetic(residual, options)
-        residual = _collect_generators_safely(
-            residual, context.generators, options)
-        residual = _simplify_coefficients(residual, options)
-        residual = _apply_structural_rules(residual, context)
-        residual = _canonicalize_residual(residual, context)
-
-        _complexity(residual) <= options.budget.max_nodes ||
-            return _preserve_previous_result(previous, residual)
-        isequal(residual, previous) && break
-    end
-
-    _classify_local_result(residual, context)
-end
-```
-
-## 3. Layer 2: assumption-aware simplification
-
-### 3.1 Role and contract
-
-Layer 2 runs on one `DiffEqBranch` and may use its domain, parameters,
-restrictions, and proven facts. It is responsible for transformations that can
-change validity unless assumptions are checked.
-
-Its contract is:
-
-```text
-simplify_branch(branch)
-    -> one equivalent branch, or a finite set of explicitly annotated branches
-```
-
-The default mode should never silently discard points. Unknown propositions
-must remain unknown, and the transformation must be skipped or branched.
-
-### 3.2 Assumption-aware pipeline
-
-```text
-local fixed point
-    |
-    v
-collect candidate factors and branch-sensitive identities
-    |
-    v
-prove nonzero, sign, reality, integrality, or domain facts
-    |
-    +--> proven: apply transformation and record proof
-    |
-    +--> disproven: reject transformation
-    |
-    +--> unknown: preserve expression or split branch if enabled
-    |
-    v
-re-run local simplification
-    |
-    v
-repeat until branch fixed point or budget
-```
-
-### 3.3 Assumption representation and proof
-
-`SymbolicDomain` stores the input constraints. Layer 2 should add a proof
-service that combines:
-
-- exact literal simplification;
-- restrictions in `branch.restrictions`;
-- parameter sign and equality facts;
-- interval or box information;
-- affine sign analysis;
-- symbolic constraint satisfiability;
-- optional polynomial root isolation.
-
-The existing `factor_divisibility` and its component/cache helpers are the
-foundation. Its result should be represented as a `ProofFact`, not merely a
-boolean:
-
-```julia
-proof = _prove_nonzero(factor, assumptions)
-proof.status === :proven || continue
-```
-
-Unknown is not false, and it must not be treated as permission to divide.
-
-### 3.4 Candidate discovery and certified cancellation
-
-Candidate discovery and proof must remain separate:
-
-```julia
-function certified_cancel(expr, assumptions)
-    current = expr
-    for candidate in common_factor_candidates(current)
-        proof = _prove_nonzero(candidate, assumptions)
-        proof.status === :proven || continue
-        next = _cancel_one_factor(current, candidate)
-        _equivalent_under_proof(next, current, proof) || continue
-        current = next
-        record_cancellation(candidate, proof)
-    end
-    current
-end
-```
-
-Focus on:
-
-- preserving factor multiplicity;
-- distinguishing numerator cancellation from denominator clearing;
-- recording excluded denominator zeros;
-- allowing dependent-variable cancellation only when restrictions prove it;
-- verifying the result by substitution or normalized residual equivalence.
-
-Never convert a denominator cancellation into a globally equivalent equation
-without retaining its nonzero condition.
-
-### 3.5 Assumption-aware function rules
-
-Rules must be grouped by their proof obligations:
-
-```julia
-const SAFE_FUNCTION_RULES = ...
-const REAL_RULES = ...
-const POSITIVE_RULES = ...
-const INTEGER_EXPONENT_RULES = ...
-const BRANCH_SENSITIVE_RULES = ...
-```
-
-Examples:
-
-- `sqrt(x^2) -> abs(x)` is safe without a sign assumption;
-- `abs(x) -> x` requires `x > 0` or a suitable nonnegative proof;
-- `log(a) + log(b) -> log(a*b)` requires compatible real/complex domain facts;
-- `(x^a)^b -> x^(a*b)` requires branch restrictions;
-- trigonometric periodic reductions require integer hypotheses where variables
-  occur in periods.
-
-The rule engine should return proof obligations instead of applying a rule
-whose predicate is unknown:
+`AssumptionState` is not stored in `DiffEqBranch` and is not a second system.
+It is derived from one branch at the start of a branch pass and discarded or
+merged into branch restrictions when the pass finishes. This keeps persistent
+state in the existing branch architecture while allowing expensive proof
+queries to be cached during one run.
+
+The existing `factor_divisibility` pipeline supplies the first proof methods:
+exact simplification, variable sign facts, affine reasoning, interval checks,
+and later stronger polynomial or constraint methods.
+
+### 4.3 Candidate discovery, proof, and application
+
+These are three distinct operations:
 
 ```julia
 struct RewriteCandidate
@@ -523,142 +531,196 @@ struct RewriteCandidate
     rule::Symbol
     obligations::Vector{Any}
 end
-```
 
-### 3.6 Branch splitting
-
-Branch splitting is appropriate only when it is finite, explicit, and useful.
-For a factor `g`, a permitted split is typically:
-
-```text
-branch A: g = 0
-branch B: g != 0
-```
-
-The nonzero branch may cancel `g`; the zero branch must retain the original
-equation and receive the new restriction. Every branch must receive a
-`FactorStep` or a dedicated `AssumptionSplitStep`.
-
-Use `DiffEqSystem` branch deduplication and fingerprints after each split.
-Enforce `max_branches`; on overflow, preserve the unsplit expression and
-return a diagnostic rather than silently truncating solutions.
-
-### 3.7 Side conditions and denominator tracking
-
-Every transformation that introduces or removes a denominator must maintain a
-side-condition set:
-
-```julia
-struct SideCondition
-    proposition::Any
-    source::Symbol
-    status::Symbol
+function _apply_assumption_rule(expr, branch, options)
+    candidates = _discover_candidates(expr, branch)
+    for candidate in candidates
+        proof = _prove_obligations(candidate.obligations, branch)
+        proof.status === :proven || continue
+        expr = _apply_candidate(expr, candidate)
+    end
+    expr
 end
 ```
 
-Side conditions belong to the branch assumptions, not to an untracked comment.
-They must participate in later proof queries and branch fingerprints.
+Separating these operations matters because candidate discovery is syntactic,
+while proof is semantic. `common_divisors` can propose a common factor, but
+`factor_divisibility` decides whether cancellation is valid on the branch.
 
-### 3.8 Layer 2 pseudocode
+### 4.4 Certified cancellation
+
+The existing `_cancel_certified_residual` and `_cancel_system` should become
+the implementation of this stage. They should be extended to preserve
+multiplicity and proof information:
 
 ```julia
-function simplify_branch(branch; options=AssumptionOptions())
-    branches = [branch]
+struct FactorCandidate
+    expression::Symbolics.Num
+    multiplicity::Int
+    source::Symbol
+    proof::Union{Nothing,ProofFact}
+end
+```
 
-    for system_pass in 1:options.max_passes
-        next_branches = DiffEqBranch[]
+The intended flow is:
 
-        for current in branches
-            local = _simplify_all_local(current, options.local)
-            candidates = _discover_assumption_rewrites(local, options)
-            outcomes = _apply_proven_rewrites_or_split(
-                local, candidates, options)
+```text
+common_divisors proposes numerator factors
+    |
+    v
+prove each factor is nonzero on this branch
+    |
+    +-- proven: divide and locally normalize
+    +-- disproven: do not divide
+    +-- unknown: preserve, or split if enabled
+```
 
-            for outcome in outcomes
-                normalized = _simplify_all_local(outcome.branch, options.local)
-                push!(next_branches, normalized)
-            end
+Factors involving dependent variables are not categorically forbidden. They
+are forbidden unless branch restrictions prove them nonzero. This allows
+future restrictions such as `u(x) != 0` to be useful without weakening the
+default safety policy.
+
+Denominator cancellation and clearing are separate operations. Removing a
+factor from a denominator can exclude its zero set, so the zero-set condition
+must be retained as a branch restriction or used to create explicit branches.
+
+### 4.5 Function rule groups
+
+`SYMBOLIC_RULE_GROUPS` should be selected through the same proof mechanism:
+
+```text
+unconditional structural rules
+real-valued rules
+positive/negative rules
+integer-exponent rules
+branch-sensitive rules
+```
+
+Each rule group has a purpose:
+
+- structural rules normalize syntax without assumptions;
+- real-valued rules make identities such as square-root transformations
+  precise;
+- sign rules remove `abs` or select signs;
+- integer rules enable periodic or exponent identities;
+- branch-sensitive rules remain opt-in unless complex branch semantics are
+  explicitly represented.
+
+Function rules should be directional within one pass. If an expansion rule
+creates a form that a contraction rule would immediately undo, the two rules
+must be placed in separate phases or guarded by a normal-form measure.
+
+### 4.6 Branch splitting
+
+Branch splitting is a system operation because it changes the `branches`
+vector, even though the reason for a split is found while processing one
+branch. It should use the existing `push_branch!` and fingerprint logic.
+
+For a factor `g`, a permitted split is:
+
+```text
+branch 1: g = 0
+branch 2: g != 0
+```
+
+The nonzero branch may cancel `g`; the zero branch retains the pre-cancellation
+equation. Both branches receive an appropriate `DerivationStep`, and both
+retain all original metadata.
+
+The split is enabled only when `enable_branch_splitting` is true and the
+resulting branch count stays below `max_branches`. If the limit is reached,
+the original unsplit branch is retained.
+
+### 4.7 Assumption-aware pseudocode
+
+```julia
+function _simplify_branch_assumption_aware(branch, options)
+    assumptions = _assumption_state(branch)
+    current = _simplify_branch_local(branch, options)
+
+    for _ in 1:options.max_passes
+        before = _branch_fingerprint(current.branch)
+        candidates = _discover_assumption_candidates(
+            current.branch, assumptions, options)
+        outcomes = _apply_proven_candidates_or_split(
+            current.branch, candidates, assumptions, options)
+
+        normalized = DiffEqBranch[]
+        for outcome in outcomes
+            result = _simplify_branch_local(outcome, options)
+            push!(normalized, result.branch)
         end
+        normalized = _deduplicate_branches(normalized)
 
-        next_branches = _deduplicate_branches(next_branches)
-        _branch_set_fingerprint(next_branches) ==
-            _branch_set_fingerprint(branches) && break
-        length(next_branches) <= options.budget.max_branches ||
-            return _return_unexpanded_branches(branches)
-        branches = next_branches
+        _branch_set_fingerprint(normalized) ==
+            _branch_set_fingerprint([current.branch]) && break
+        current = _select_or_return_branch_results(normalized)
     end
 
-    branches
+    current
 end
 ```
 
-## 4. Layer 3: system reduction
+The exact return type can be specialized during implementation, but the
+important interaction is fixed: every accepted assumption-aware rewrite is
+followed by local simplification because cancellation and function rewrites
+can expose new generator or coefficient structure.
 
-### 4.1 Role and contract
+## 5. Layer 3: system reduction
 
-Layer 3 uses relationships between equations. It is not merely another rewrite
-pass. Its transformations may eliminate variables, derive compatibility
-conditions, remove redundancy, or create branches.
+### 5.1 Role and contract
 
-Its contract is:
+System reduction is the only layer allowed to use one equation as information
+about another. It operates on the complete `DiffEqSystem`, but applies
+transformations branch by branch because each branch is a separate solution-set
+component.
+
+Its initial scope should be conservative:
+
+- duplicate equation removal;
+- proven scalar-multiple removal;
+- algebraic substitutions with explicit pivot conditions;
+- selected polynomial elimination.
+
+Differential consequences, integrability conditions, and differential
+elimination are later capabilities. They are not required for the basic
+local/assumption-aware simplifier and must be opt-in.
+
+### 5.2 Why system reduction is interleaved
+
+The layers affect one another:
 
 ```text
-simplify_system(sys)
-    -> an equivalent system, represented as one or more explicit branches
+local normalization
+    -> exposes comparable equations and pivots
+system reduction
+    -> substitutes or eliminates and creates new expressions
+local normalization
+    -> expands, collects, and canonicalizes those expressions
+assumption-aware simplification
+    -> proves newly exposed cancellations
+system reduction again
+    -> discovers relations exposed by cleanup
 ```
 
-The default system profile should begin with conservative algebraic reduction.
-Differential elimination and integrability analysis should be opt-in until their
-solution-class semantics are fully specified.
+Running system reduction only after all local work misses relations exposed by
+substitution. Running it only before local work misses relations hidden by
+different equation layouts. The system pass therefore runs after a local
+fixed point and is followed by local and assumption-aware passes on changed
+branches.
 
-### 4.2 Interleaved system pipeline
+### 5.3 Relation records
 
-System reduction must be interleaved with local and assumption-aware passes:
-
-```text
-local normalize every branch
-    |
-    v
-assumption-aware branch normalization
-    |
-    v
-system-wide candidate discovery
-    |
-    v
-apply one safe reduction batch
-    |
-    v
-local normalize changed equations
-    |
-    v
-assumption-aware normalization
-    |
-    v
-repeat until the whole branch set is stable
-```
-
-The local pass runs before system reduction so equations have comparable
-residual forms. It runs after system reduction because substitution and
-elimination create new expressions. The system pass runs again because local
-cleanup may expose new relationships.
-
-### 4.3 System-level data structures
+Relation discovery should return records that explain why a system operation is
+allowed:
 
 ```julia
-struct SystemReductionOptions
-    max_passes::Int
-    enable_substitution::Bool
-    enable_redundancy_removal::Bool
-    enable_algebraic_elimination::Bool
-    enable_differential_consequences::Bool
-    ranking::Symbol
-    budget::ComplexityBudget
-end
-
 struct EquationRelation
     kind::Symbol       # :duplicate, :multiple, :substitution, :elimination
-    equations::Vector{Int}
-    variable::Union{Nothing,Symbolics.Num}
+    equation_indices::Vector{Int}
+    pivot::Union{Nothing,Symbolics.Num}
+    replacement::Union{Nothing,Symbolics.Num}
+    conditions::Vector{Any}
     certificate::Any
 end
 
@@ -668,260 +730,257 @@ struct SystemReductionStep <: DerivationStep
 end
 ```
 
-The system reducer should operate on immutable snapshots and return a
-transformation result:
+`EquationRelation` is a plan for one system operation. It is not persistent
+system state. `SystemReductionStep` is the persistent history record when a
+system reduction changes a branch.
 
-```julia
-struct SystemReductionResult
-    branches::Vector{DiffEqBranch}
-    changed::Bool
-    step::Union{Nothing,SystemReductionStep}
-    diagnostics::Vector{Any}
-end
-```
+### 5.4 Relation discovery order
 
-### 4.4 System Stage A: local preparation
+Discover relations from least to most powerful:
 
-For each branch:
-
-1. normalize every equation to a residual;
-2. simplify boundary conditions locally;
-3. classify identities, contradictions, and parameter conditions;
-4. canonicalize equations and compute fingerprints;
-5. preserve equation-to-source indices for diagnostics.
-
-Remove identities only when they are redundant in the system representation.
-Contradictions should mark a branch inconsistent and remove it from the
-solution union with a recorded reason.
-
-### 4.5 System Stage B: relation discovery
-
-Discover relations in increasing order of semantic power:
-
-1. exact duplicate equations;
-2. nonzero scalar multiples;
-3. algebraic substitutions with explicit pivot conditions;
+1. exact canonical duplicates;
+2. proven nonzero scalar multiples;
+3. conservative substitutions;
 4. linear elimination in selected generators;
 5. polynomial elimination;
-6. differential consequences and compatibility conditions.
+6. differential consequences.
 
-The early relations can use residual fingerprints and `Nemo` polynomial
-representations. Do not infer equivalence from string equality alone.
+This order reduces cost and risk. A duplicate does not need a polynomial
+backend, while differential consequences require assumptions about regularity
+and solution classes.
 
-### 4.6 System Stage C: conservative substitutions
+### 5.5 Duplicate and scalar-multiple removal
 
-A substitution candidate should contain:
+Local canonicalization makes exact duplicates detectable. Scalar multiples
+require a proof that the scalar is nonzero on the branch. The operation should
+remove only the redundant equation and preserve the equation that has the
+preferred canonical form.
 
-```text
-pivot variable or generator
-replacement expression
-source equation
-nonzero conditions
-complexity estimate
-```
+An equation that is merely numerically or heuristically similar is not
+redundant. The relation must have a structural or symbolic certificate.
 
-Prefer substitutions that reduce a ranking measure:
+### 5.6 Conservative substitution
 
-```text
-highest derivative order
-number of differential generators
-number of equations containing the pivot
-expression node count
-```
+A substitution candidate must identify:
 
-Do not substitute a nonlinear expression merely because it can be algebraically
-solved if the solve introduces untracked roots, branches, or denominators.
+- source equation;
+- pivot generator or algebraic variable;
+- replacement expression;
+- nonzero conditions;
+- affected equations;
+- a complexity/ranking improvement.
 
-After substitution:
+The reducer should prefer pivots that reduce the highest differential order or
+the number of equations containing the pivot. It must reject substitutions
+that introduce untracked roots, denominators, or branch choices.
 
-```julia
-for affected_eq in affected_equations
-    replace(affected_eq, substitution)
-    simplify_equation(affected_eq, new_context)
-end
-```
+After applying a substitution, only affected equations need to be rerun
+through the local pipeline, but all equations must be reconsidered by relation
+discovery afterward.
 
-### 4.7 System Stage D: redundancy and consistency
+### 5.7 Polynomial elimination and `Nemo`
 
-Detect and remove only equations whose removal is certified:
+For a region classified as polynomial in selected generators:
 
-- exact canonical duplicates;
-- proven nonzero scalar multiples;
-- equations reducible to zero by an accepted elimination basis;
-- equations implied by recorded substitutions.
+1. build an `AtomTable` for derivatives and supported nonlinear atoms;
+2. map the region to a `Nemo` polynomial ring;
+3. choose a deterministic generator ranking;
+4. perform exact factorization, gcd, or elimination;
+5. map accepted results back through the atom table;
+6. locally normalize the resulting equations;
+7. verify the relation against the original branch before removing anything.
 
-An equation that is merely numerically similar or heuristically smaller is not
-redundant. Retain it unless an exact certificate exists.
+The atom map is necessary because Symbolics expressions may contain functions
+that Nemo does not know. Treating `exp(u')` as a temporary indeterminate is
+valid for algebraic manipulation of that expression, but it does not authorize
+analytic rewrites involving the exponential.
 
-### 4.8 System Stage E: algebraic elimination
+### 5.8 Differential consequences
 
-For expressions classified as polynomial in selected atoms:
+Differentiating one equation to derive another can reveal compatibility
+conditions, but it changes the level of reasoning. It should be enabled only
+when options and branch metadata declare the required regularity convention.
 
-1. map Symbolics expressions to a `Nemo` polynomial ring;
-2. choose a variable/generator ranking;
-3. compute a conservative elimination or Groebner-style relation;
-4. map results back through an atom table;
-5. expand and locally normalize;
-6. verify each accepted relation against the original system.
+By default, a differential consequence may be added as a redundant equation
+for consistency checking, but it must not replace the original equation.
+Replacing equations requires an equivalence certificate or explicit branches.
 
-`Nemo.jl` is appropriate for exact polynomial arithmetic and Groebner bases.
-Use `SymbolicUtils` to construct the atom map and `Symbolics` to restore
-expressions. Transcendental and unsupported atoms must be treated as algebraic
-indeterminates only when that abstraction is documented and does not claim
-analytic identities.
-
-### 4.9 Stage F: differential consequences
-
-Differentiating equations can reveal compatibility conditions, but it is not a
-routine simplification operation. It depends on the intended solution class and
-regularity assumptions.
-
-Enable it only when the context declares:
-
-- the independent-variable derivative is valid;
-- the required smoothness or distributional convention;
-- the resulting consequence is used for elimination or consistency checking;
-- no original equation is removed without a separate equivalence argument.
-
-Differential consequences may be added as consequences without replacing the
-original system. If replacing equations, the reducer must prove equivalence or
-create the necessary branch/side conditions.
-
-### 4.10 Stage G: post-reduction normalization
-
-Every changed equation goes through Layer 1, then Layer 2. This is mandatory:
-
-```text
-system reduction
-    -> local derivative/arithmetic normalization
-    -> generator classification and collection
-    -> assumption-aware cancellation
-    -> canonicalization
-```
-
-The system reducer then reruns relation discovery on the normalized result.
-This continues until the branch-set fingerprint is stable or a budget is
-reached.
-
-### 4.11 Layer 3 pseudocode
+### 5.9 System reduction pseudocode
 
 ```julia
-function simplify_system(sys; options=SystemReductionOptions())
-    branches = _prepare_branches_locally(sys, options)
+function simplify_system(sys::DiffEqSystem;
+    options=SimplificationOptions())
 
-    for pass in 1:options.max_passes
-        before = _branch_set_fingerprint(branches)
+    current = _copy_system(sys)
+    current = _simplify_all_branches_locally(current, options)
+    current = _simplify_all_branches_assumption_aware(current, options)
 
-        branches = _run_assumption_layer(branches, options.assumptions)
-        relations = _discover_system_relations(branches, options)
-        reduced = _apply_safe_relation_batch(branches, relations, options)
-        branches = _normalize_changed_branches(reduced.branches, options)
-        branches = _deduplicate_and_classify(branches)
+    if options.enable_system_reduction
+        for _ in 1:options.max_system_passes
+            before = _system_fingerprint(current)
+            relations = _discover_relations(current, options)
+            isempty(relations) && break
 
-        after = _branch_set_fingerprint(branches)
-        after == before && break
-        _within_budget(branches, options.budget) ||
-            return _return_last_stable_system(branches)
+            current = _apply_relation_batch(current, relations, options)
+            current = _simplify_changed_branches_locally(current, options)
+            current = _simplify_all_branches_assumption_aware(
+                current, options)
+            current = _classify_and_deduplicate(current, options)
+
+            _system_fingerprint(current) == before && break
+            _within_budget(current, options) || break
+        end
     end
 
-    DiffEqSystem(branches)
+    _append_simplification_history_if_changed(current, sys, options)
 end
 ```
 
-Apply reductions in batches only when they are independent. Otherwise apply one
-relation, normalize, and rediscover relations. This prevents stale pivots and
-reduces the risk of cascading invalid substitutions.
+The default implementation may call only the first two branch passes because
+`enable_system_reduction` defaults to false. The architecture still supports
+the system layer without making ordinary local simplification unexpectedly
+expensive or semantically aggressive.
 
-## 5. Packages and implementation responsibilities
+### 5.10 System classification
 
-### Existing core packages
+After each branch-local pass and each system-reduction pass:
 
-- **Symbolics.jl:** symbolic variables, equations, derivatives,
-  `expand_derivatives`, `simplify`, substitution, and structural metadata.
-- **SymbolicUtils.jl:** expression-tree traversal, rewrite rules, postwalk
-  rewriters, structural matching, and atom inspection.
-- **ModelingToolkit.jl:** differential variables, parameter metadata,
-  registered symbolic functions, and system interoperability.
-- **Nemo.jl:** exact polynomial rings, factorization, gcd/content operations,
-  Groebner bases, and polynomial elimination for classified polynomial regions.
-- **IntervalArithmetic.jl / IntervalBoxes.jl:** interval sign and nonzero
-  reasoning where branch domains provide interval information.
-- **DomainSets.jl:** domain construction and set operations when symbolic
-  domain representations need a richer backend.
+- remove identity equations from a branch when they carry no needed metadata;
+- discard branches containing a proven contradiction;
+- preserve parameter/domain-only conditions as restrictions;
+- deduplicate branches using canonical fingerprints;
+- preserve `pending`, `completed`, and `seen` semantics through the returned
+  `DiffEqSystem`.
 
-### Recommended use boundaries
+The current `_branch_fingerprint` is the foundation, but it should eventually
+fingerprint canonical equations and normalized domains so syntactically
+different routes to the same branch merge reliably.
 
-Do not use `Nemo` on arbitrary Symbolics expressions. First classify an
-expression as polynomial in a selected atom set and build a reversible atom
-table. Do not use generic rewrite rules as proof of domain equivalence.
-Use `Symbolics` for expression construction and `SymbolicUtils` for traversal,
-but keep proof and branch metadata in DiffEqCAS-owned structures.
+## 6. Complete interaction model
 
-## 6. Testing and acceptance criteria
-
-Each layer needs tests for both successful transformations and deliberate
-non-transformations.
-
-### Layer 1 tests
-
-- product and chain-rule derivative expansion;
-- higher and mixed derivatives;
-- polynomial collection by dependent variables and differential generators;
-- `exp(u')`, `sin(u'')`, and similar nonlinear differential atoms;
-- coefficient expressions containing other differential generators;
-- stable ordering and fixed-point behavior;
-- identity and contradiction classification;
-- expression-growth budget preservation.
-
-### Layer 2 tests
-
-- cancellation of numeric and parameter factors proven nonzero;
-- refusal to cancel unknown or potentially zero factors;
-- cancellation under explicit dependent-variable restrictions;
-- denominator side-condition preservation;
-- square-root, logarithm, power, and absolute-value rules with and without
-  sufficient assumptions;
-- branch splitting, deduplication, and maximum-branch handling;
-- proof metadata in derivation history.
-
-### Layer 3 tests
-
-- duplicate and scalar-multiple equation removal;
-- conservative algebraic substitution;
-- substitution followed by local re-normalization;
-- repeated local/system fixed points;
-- elimination of polynomial atoms through a reversible `Nemo` map;
-- inconsistent and redundant systems;
-- preservation of boundary conditions and branch metadata;
-- differential-consequence mode disabled by default and correctly gated when
-  enabled.
-
-Every accepted transformation should be tested by a semantic check appropriate
-to its layer:
+The following is the intended full pipeline for one call:
 
 ```text
-local: normalized residual equivalence
-assumption-aware: equivalence under proof facts and side conditions
-system: solution-set preservation certificate or explicit branch decomposition
+input DiffEqSystem
+    |
+    v
+copy system and preserve original histories
+    |
+    v
+for every branch:
+    local fixed point on equations and boundary conditions
+    assumption-aware fixed point
+    classify identity/contradiction/conditions
+    |
+    v
+if system reduction is enabled:
+    repeat until system fixed point:
+        discover relations across equations in each branch
+        apply one safe relation batch
+        locally simplify changed equations
+        assumption-aware simplify changed branches
+        classify and deduplicate
+    |
+    v
+append SimplificationStep(options) to each changed branch
+return DiffEqSystem
 ```
 
-## 7. Implementation order
+The order is not merely procedural:
 
-Implement in this order to keep every intermediate version useful:
+- local derivative expansion enables generator collection;
+- generator collection exposes factors and pivots;
+- assumptions decide which factors and function rules are legal;
+- system substitution creates expressions that need local collection again;
+- local cleanup exposes new system relations;
+- canonicalization makes fixed-point and duplicate detection deterministic.
 
-1. Extract a reusable local residual/canonicalization pipeline.
-2. Add differential-structure classification and nonlinear atom preservation.
-3. Integrate safe generator collection and final coefficient normalization.
-4. Add complexity budgets and stable fingerprints.
-5. Refine `factor_divisibility` into proof-producing assumption queries.
-6. Implement certified factor cancellation and side-condition tracking.
-7. Wire `SYMBOLIC_RULE_GROUPS` through assumption-aware rule selection.
-8. Implement duplicate/scalar-multiple system normalization.
-9. Add conservative substitution and post-reduction local normalization.
-10. Add polynomial atom maps and `Nemo`-backed elimination.
-11. Add optional differential consequences only after regularity semantics are
-    documented and tested.
+## 7. Package responsibilities
 
-The default public simplifier should initially enable Layers 1 and 2 in a
-conservative profile. Layer 3 should be opt-in until its reduction certificates,
-branch behavior, and performance limits are stable.
+- **Symbolics.jl:** equations, symbolic variables, derivatives,
+  `expand_derivatives`, substitution, and `simplify`.
+- **SymbolicUtils.jl:** tree traversal, structural classification, rewrite
+  matching, and `SPECIAL_REWRITER`.
+- **ModelingToolkit.jl:** dependent-variable/parameter metadata and registered
+  symbolic functions.
+- **Nemo.jl:** exact polynomial factorization, gcd, and elimination after an
+  `AtomTable` has classified a polynomial region.
+- **IntervalArithmetic.jl / IntervalBoxes.jl:** interval nonzero and sign
+  proofs for branch domains.
+- **DomainSets.jl:** richer domain operations if `SymbolicDomain` needs them.
+
+The packages should be used behind DiffEqCAS-owned helpers. A backend result
+must be converted back into `Symbolics.Num` and verified before it changes a
+branch.
+
+## 8. Testing plan
+
+Tests should follow the architecture and verify interactions, not only
+individual rewrites.
+
+### Local layer
+
+- product and chain-rule derivative expansion;
+- mixed and higher derivatives;
+- polynomial generator collection;
+- preservation of `exp(u')`, `sin(u'')`, and similar nonlinear atoms;
+- coefficients containing other differential generators;
+- deterministic canonical forms;
+- identity, contradiction, and parameter-condition classification;
+- derivative and expression node budgets.
+
+### Assumption-aware layer
+
+- cancellation of proven nonzero numeric and parameter factors;
+- refusal to cancel unknown or potentially zero factors;
+- cancellation using explicit branch restrictions;
+- denominator side-condition preservation;
+- function rules with sufficient and insufficient sign/reality assumptions;
+- branch splitting, deduplication, and branch limits;
+- `SimplificationStep(options)` in changed branch histories.
+
+### System layer
+
+- duplicate and scalar-multiple removal;
+- substitution followed by local recollection;
+- a local cleanup exposing a second system relation;
+- polynomial elimination through a reversible `AtomTable`;
+- inconsistent and redundant branch handling;
+- preservation of boundary conditions and branch metadata;
+- differential-consequence mode disabled by default and gated when enabled.
+
+Each accepted transformation needs an appropriate check:
+
+```text
+local: residual canonicalization/equivalence
+assumption-aware: equivalence under proven facts and side conditions
+system: relation certificate or explicit branch decomposition
+```
+
+## 9. Implementation order
+
+1. Keep `simplify_system` as the public orchestration entry point and refactor
+   its current helpers into explicit local stages.
+2. Implement residual canonicalization and identity/contradiction
+   classification while preserving `DiffEqBranch` metadata.
+3. Refactor `group_coefficients` into a safe collector with differential-term
+   classification and nonlinear atom preservation.
+4. Expand `SimplificationOptions` with shared budgets and layer switches;
+   record the same options in `SimplificationStep`.
+5. Add stable canonical fingerprints and ensure fixed-point checks use them.
+6. Turn divisibility results into proof facts and implement certified
+   cancellation with branch restrictions.
+7. Wire assumption-aware `SYMBOLIC_RULE_GROUPS` into the branch pass.
+8. Implement duplicate/scalar-multiple system relations using canonical
+   residuals.
+9. Implement conservative substitutions and mandatory post-substitution local
+   and assumption-aware passes.
+10. Add `AtomTable` and Nemo-backed polynomial operations for classified
+    regions.
+11. Add optional branch splitting and differential consequences only after
+    their history, regularity, and solution-set semantics are tested.
+
+This order produces useful behavior at every step and keeps the implementation
+aligned with the existing architecture: one `DiffEqSystem` is simplified at a
+time, branches carry assumptions and history, and `SimplificationOptions`
+describes and records the complete run.
