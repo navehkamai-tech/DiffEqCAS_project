@@ -79,7 +79,55 @@ nonzero facts and branch restrictions are branch-specific. System-wide
 reduction may compare several equations in one branch, but it must not use facts
 from one branch to rewrite another.
 
-### 1.3 `SimplificationOptions` configures one complete run
+### 1.3 Immutable input root
+
+An input root is useful provenance, but it is not needed to execute
+simplification. It allows callers and tests to answer "what did this result
+come from?" without reconstructing the input from a later history.
+
+The root should be an immutable snapshot owned by `DiffEqSystem`, not a
+reference to a mutable `DiffEqSystem` and not a parent pointer. Storing the
+mutable input object would not preserve the original state if that object were
+later changed. Storing a whole `DiffEqSystem` would also copy work queues and
+deduplication state that are execution details rather than input data.
+
+Because one `DiffEqSystem` can contain several initial branches, the snapshot
+should contain one immutable record per initial branch. It does not need to
+reuse `DiffEqBranch`; its job is to preserve input values, not to participate
+in branch processing:
+
+```julia
+struct SimplificationRoot
+    branches::Tuple  # immutable named-tuple snapshots of initial branch data
+end
+```
+
+Each element of `branches` should be constructed from immutable containers
+(tuples for vectors, immutable domain/restriction snapshots, and copied
+metadata). The implementation can use an internal immutable named tuple with
+the fields `identifier`, `ivs`, `dvs`, `ps`, `eqs`, `bcs`, `original_domain`,
+`restrictions`, and `name`; it should not store mutable
+`DiffEqBranch` objects inside the root.
+
+Conceptually, the `DiffEqSystem` proposal therefore becomes (preserving the
+existing type parameters in the implementation):
+
+```julia
+mutable struct DiffEqSystem
+    branches::Vector{DiffEqBranch}
+    pending::Stack{DiffEqBranch}
+    completed::Vector{DiffEqBranch}
+    seen::Set{UInt}
+    root::SimplificationRoot
+end
+```
+
+The root is created when the system is constructed and copied unchanged into
+results. `DerivationHistory` still records *how* a branch changed, while
+`root` records *what the complete input system was*. No DAG, parent links, or
+copied intermediate systems are required.
+
+### 1.4 `SimplificationOptions` configures one complete run
 
 `SimplificationOptions` should be the single configuration object for the
 entire simplification run. It is stored in `SimplificationStep`, which is
@@ -109,7 +157,7 @@ Base.@kwdef struct SimplificationOptions
     enable_factorization::Bool = false
     enable_function_rules::Bool = false
     enable_system_reduction::Bool = false
-    enable_branch_splitting::Bool = false
+    enable_branch_splitting::Bool = false # dependent-variable cases only
     enable_differential_consequences::Bool = false
 
     normal_form::Symbol = :collected
@@ -148,8 +196,10 @@ The other limits have similarly different scopes:
   post-reduction expressions.
 - `max_derivative_nodes` is the stricter limit for the temporary result of
   derivative expansion, which is especially prone to combinatorial growth.
-- `max_branches` limits the number of solution-set branches after
-  assumption-aware splitting.
+- `max_branches` limits the number of solution-set branches after optional
+  dependent-variable case splitting. It does not control domain restriction,
+  because this design does not create branches for independent-variable
+  regions.
 
 If a limit is reached, the current transformation is rejected or the last
 stable result is returned. A limit must never cause equations, branches, or
@@ -166,30 +216,103 @@ expression size or branch count. A limit is not a simplification result:
 when reached, the implementation keeps the last stable result and records a
 diagnostic rather than returning an incomplete success-shaped transformation.
 
-### 1.4 Results and diagnostics
+### 1.5 Domain validity without duplicated state
+
+This design does not fracture a system into branches for independent-variable
+conditions. It does, however, retain enough domain information to distinguish
+the original problem's domain from constraints added while simplifying.
+
+Do not store both an original domain and a second copy of the fully intersected
+domain. Instead, use:
+
+```julia
+mutable struct DiffEqBranch
+    # existing fields
+    original_domain::SymbolicDomain
+    domain_restrictions::Vector{NamedTuple{(:condition, :source),Tuple{Any,Symbol}}}
+    domain_set::Union{Nothing,Tuple{<:AbstractVector{<:IntervalBoxes.IntervalBox},
+                                    <:AbstractVector{<:IntervalBoxes.IntervalBox}}}
+    # remaining existing fields
+end
+```
+
+The exact Julia type of the named tuple may be simplified during
+implementation. The invariant is the important part:
+
+- `original_domain` stores the domain supplied when this branch was created
+  and is never rewritten;
+- `domain_restrictions` stores only constraints added afterward, once each,
+  with a source such as `:expression_domain`, `:rewrite_validity`, or
+  `:user_restriction`;
+- `domain_set` remains the existing derived interval cache and is invalidated
+  when a new restriction is added.
+
+The effective domain is computed by a helper when needed:
+
+```julia
+function _effective_domain(branch)
+    add_constraints(
+        branch.original_domain,
+        [entry.condition for entry in branch.domain_restrictions],
+        branch.ivs,
+    )
+end
+```
+
+The effective domain may be cached in the run-local `AssumptionState` and its
+numeric interval result may use the existing `domain_set` mechanism, but it
+should not be stored as another persistent symbolic copy. Proof routines and
+solver adapters use `_effective_domain(branch)`; transformations append a
+restriction rather than repeatedly rebuilding and storing a second full
+constraint list. Repeated identical restrictions should be deduplicated by
+canonical expression fingerprint.
+
+This representation is more informative than an `undefined_domain` field.
+The complement of the effective domain relative to the original domain is not
+always “undefined”: it may be excluded because the original expression is
+undefined there, because a particular rewrite requires a side condition, or
+because the user supplied an additional restriction. The `source` records
+which meaning applies without storing the complement set.
+
+This also matches the usual assumption-oriented design of general-purpose
+CASs: they retain assumptions or domain predicates needed to justify a
+transformation, rather than eagerly materializing every complementary region
+as another symbolic object. The simplifier follows that practice while
+retaining more provenance than a bare assumption set through the `source`
+field and the immutable root.
+
+For example, a real equation containing `log(g(x))` adds:
+
+```text
+(g(x) > 0, :expression_domain)
+```
+
+to `domain_restrictions`. The equation is then solver-valid only on the
+effective domain. Simplifying `(x^2 - 1)/(x - 1)` to `x + 1` adds
+`(x != 1, :rewrite_validity)` only if the rewrite is explicitly allowed to
+narrow the problem; otherwise the rewrite is rejected. No independent-variable
+branch is created in either case.
+
+The root snapshot retains the original domain for whole-system provenance.
+The branch's `original_domain` is the branch-local base for descendants and
+the restriction list records exactly how that branch narrowed. The root is not
+passed through proof or transformation routines.
+
+This policy is aligned with the project goal of producing systems that can be
+passed to ModelingToolkit and numerical solvers. Those consumers receive one
+effective valid domain per branch, while the implementation avoids duplicating
+all original constraints in every transformed branch.
+
+### 1.6 Results and diagnostics
 
 The normal public result is still `DiffEqSystem`. Internal helpers need
 structured results so a rejected or budget-limited transformation is visible:
 
-```julia
-struct SimplificationDiagnostics
-    warnings::Vector{Symbol}
-    rejected_rules::Vector{Symbol}
-    rejected_transformations::Vector{Any}
-    node_counts::Vector{Int}
-end
-
-struct BranchSimplificationResult
-    branch::DiffEqBranch
-    changed::Bool
-    diagnostics::SimplificationDiagnostics
-end
-```
-
-Diagnostics should normally be internal until a public reporting API is
-designed. They are still important: unsupported transcendental structure,
-unknown nonzero facts, and budget refusals must not look like successful
-rewrites.
+Diagnostics should normally remain internal until a public reporting API is
+designed. They can be returned by internal helpers as a named tuple or a
+small result value, but they do not need new persistent structs: unsupported
+transcendental structure, unknown nonzero facts, and budget refusals are
+implementation diagnostics, not part of a branch's mathematical state.
 
 ## 2. Normal forms and shared concepts
 
@@ -319,6 +442,32 @@ independent algebraic atom.
 
 `Nemo.jl` is used only after this classification and mapping. Unsupported
 subexpressions remain atoms or are left untouched.
+
+### 2.4 Which proposed structs persist
+
+The design intentionally keeps the data model small. Persistent state belongs
+in `DiffEqSystem`, `DiffEqBranch`, and `DerivationHistory`; the following
+additional types have distinct roles:
+
+| Type | Role | Why it is not another existing field |
+| --- | --- | --- |
+| `SimplificationRoot` | Immutable snapshot of the complete input | Provenance of the whole system is different from branch history |
+| `ProofFact` | Result and evidence of one semantic proof | A boolean cannot distinguish proven, disproven, and unknown |
+| `AssumptionState` | Run-local cache of facts for one branch | It is temporary computation state, not persistent branch metadata |
+| `DifferentialTerm` | Classification of expression dependence on selected generators | It guides local collection and is not an equation or branch field |
+| `AtomTable` | Reversible map for one polynomial backend call | It is temporary translation state, not a symbolic variable declaration |
+| `FactorCandidate` | Factor multiplicity and proof attached to cancellation | Factor discovery data is not the same as a branch restriction |
+| `EquationRelation` | Proposed cross-equation operation and certificate | It describes a reduction candidate, not a transformed equation |
+| `SystemReductionStep` | History record for accepted system reduction | It records a system operation distinct from local simplification |
+
+Do not add separate persistent structs for generic rewrite candidates,
+diagnostics, solution pieces, guards, domain pieces, or complexity contexts.
+Rewrite candidates and diagnostics are pass-local values. Independent-variable
+conditions use `DiffEqBranch.original_domain` plus its
+`domain_restrictions`; dependent-variable conditions use
+`DiffEqBranch.restrictions`. Resource limits and policy use
+`SimplificationOptions`. This prevents several objects from representing the
+same concept under different names.
 
 ## 3. Layer 1: local equation simplification
 
@@ -547,7 +696,7 @@ complete requested run changes the branch.
 
 Layer 2 is still branch-local, but it may use:
 
-- `branch.domain`;
+- `_effective_domain(branch)`;
 - `branch.restrictions`;
 - parameter metadata;
 - interval/domain caches;
@@ -563,7 +712,8 @@ An unknown fact is not permission to rewrite. The result is either:
 ```text
 proved transformation
 rejected transformation
-explicit branch split
+dependent-variable case split, when explicitly enabled
+domain restriction, when the expression is undefined outside the valid domain
 ```
 
 ### 4.2 Assumption state for one branch
@@ -573,7 +723,7 @@ introduced as an internal run-local object:
 
 ```julia
 struct AssumptionState
-    domain::SymbolicDomain
+    effective_domain::SymbolicDomain
     restrictions::Vector{Any}
     facts::Dict{Any,ProofFact}
 end
@@ -596,16 +746,41 @@ The existing `factor_divisibility` pipeline supplies the first proof methods:
 exact simplification, variable sign facts, affine reasoning, interval checks,
 and later stronger polynomial or constraint methods.
 
-### 4.3 Candidate discovery, proof, and application
+### 4.2.1 Domain validity is restriction, not splitting
 
-These are three distinct operations:
+When a recognized operation is undefined outside a part of the independent
+variable domain, add a restriction to the current branch. Do not create a
+second `DiffEqBranch` or a second fully intersected domain field for the
+discarded region. It is not a second solution family of the original equation.
 
 ```julia
-struct RewriteCandidate
-    expression::Symbolics.Num
-    rule::Symbol
-    obligations::Vector{Any}
+function _add_domain_restriction!(branch, condition, source)
+    push!(branch.domain_restrictions,
+        (condition=condition, source=source))
+    branch.domain_set = nothing
+    branch
 end
+```
+
+For a real `log(g(x))`, this means adding `(g(x) > 0, :expression_domain)`.
+The invalid region must not be passed to ModelingToolkit or a
+numerical solver as another equation system. If the valid domain is unknown,
+the operation is not applied. The immutable root remains available if
+provenance code later needs to compare the original and current domains.
+
+This is deliberately narrower than general piecewise-domain analysis. Domain
+fracturing, interface matching, and region-wise solution reconstruction are
+outside the simplifier's goal of producing solver-ready algebraic systems.
+
+### 4.3 Candidate discovery, proof, and application
+
+Candidate discovery, proof, and application are three distinct operations.
+Candidate discovery does not need a persistent struct: it can return a
+collection of named tuples or another internal value local to one pass. This
+keeps the public/persistent data model small:
+
+```julia
+candidate = (expression=expr, rule=:log_product, obligations=conditions)
 
 function _apply_assumption_rule(expr, branch, options)
     candidates = _discover_candidates(expr, branch)
@@ -647,7 +822,7 @@ prove each factor is nonzero on this branch
     |
     +-- proven: divide and locally normalize
     +-- disproven: do not divide
-    +-- unknown: preserve, or split if enabled
+    +-- unknown: preserve, or dependent-variable split if enabled
 ```
 
 Factors involving dependent variables are not categorically forbidden. They
@@ -656,8 +831,11 @@ future restrictions such as `u(x) != 0` to be useful without weakening the
 default safety policy.
 
 Denominator cancellation and clearing are separate operations. Removing a
-factor from a denominator can exclude its zero set, so the zero-set condition
-must be retained as a branch restriction or used to create explicit branches.
+factor from a denominator can exclude its zero set. For an
+independent-variable factor, the default is to retain the original expression
+unless the current domain already excludes the zero set; do not create domain
+branches. For a dependent-variable factor, optional case-analysis mode may
+create disjoint solution branches with the appropriate restriction.
 
 ### 4.5 Function rule groups
 
@@ -685,11 +863,14 @@ Function rules should be directional within one pass. If an expansion rule
 creates a form that a contraction rule would immediately undo, the two rules
 must be placed in separate phases or guarded by a normal-form measure.
 
-### 4.6 Branch splitting
+### 4.6 Dependent-variable branch splitting
 
-Branch splitting is a system operation because it changes the `branches`
-vector, even though the reason for a split is found while processing one
-branch. It should use the existing `push_branch!` and fingerprint logic.
+Only dependent-variable case splitting is part of this plan. It is a system
+operation because it changes the `branches` vector, even though the reason for
+a split is found while processing one branch. It should use the existing
+`push_branch!` and fingerprint logic. Independent-variable conditions update
+the single current `domain` on the branch; they never create
+branches.
 
 For a factor `g`, a permitted split is:
 
@@ -704,7 +885,9 @@ retain all original metadata.
 
 The split is enabled only when `enable_branch_splitting` is true and the
 resulting branch count stays below `max_branches`. If the limit is reached,
-the original unsplit branch is retained.
+the original unsplit branch is retained. Ordinary simplification should leave
+factorized equations unsplit; splitting is an explicit case-analysis feature
+because every child must eventually be solved and the solution sets unioned.
 
 ### 4.7 Assumption-aware pseudocode
 
@@ -1010,8 +1193,11 @@ individual rewrites.
 - refusal to cancel unknown or potentially zero factors;
 - cancellation using explicit branch restrictions;
 - denominator side-condition preservation;
+- valid-domain restriction through `original_domain` plus
+  `domain_restrictions`;
 - function rules with sufficient and insufficient sign/reality assumptions;
 - branch splitting, deduplication, and branch limits;
+- immutable root preservation through branch transformations;
 - `SimplificationStep(options)` in changed branch histories.
 
 ### System layer
@@ -1022,6 +1208,7 @@ individual rewrites.
 - polynomial elimination through a reversible `AtomTable`;
 - inconsistent and redundant branch handling;
 - preservation of boundary conditions and branch metadata;
+- preservation of `root` and the current branch domain;
 - differential-consequence mode disabled by default and gated when enabled.
 
 Each accepted transformation needs an appropriate check:
@@ -1032,27 +1219,40 @@ assumption-aware: equivalence under proven facts and side conditions
 system: relation certificate or explicit branch decomposition
 ```
 
+Domain restriction is checked separately: the new `domain` must be the old
+domain intersected with the equation's known valid region. The removed part is
+not a solution-set decomposition and is therefore not stored or passed to a
+solver. The immutable root remains available for optional provenance
+comparisons, and the restriction can be recorded in transformation history or
+diagnostics if that explanation is needed.
+
 ## 9. Implementation order
 
 1. Keep `simplify_system` as the public orchestration entry point and refactor
    its current helpers into explicit local stages.
-2. Implement residual canonicalization and identity/contradiction
-   classification while preserving `DiffEqBranch` metadata.
-3. Refactor `group_coefficients` into a safe collector with differential-term
-   classification and nonlinear atom preservation.
-4. Expand `SimplificationOptions` with shared budgets and layer switches;
-   record the same options in `SimplificationStep`.
-5. Add stable canonical fingerprints and ensure fixed-point checks use them.
-6. Turn divisibility results into proof facts and implement certified
-   cancellation with branch restrictions.
-7. Wire assumption-aware `SYMBOLIC_RULE_GROUPS` into the branch pass.
-8. Implement duplicate/scalar-multiple system relations using canonical
-   residuals.
-9. Implement conservative substitutions and mandatory post-substitution local
-   and assumption-aware passes.
-10. Add `AtomTable` and Nemo-backed polynomial operations for classified
+2. Add immutable `SimplificationRoot` snapshots to `DiffEqSystem` construction
+    and copying before transformations are implemented.
+3. Implement residual canonicalization and identity/contradiction
+    classification while preserving `DiffEqBranch` metadata.
+4. Refactor `group_coefficients` into a safe collector with differential-term
+    classification and nonlinear atom preservation.
+5. Expand `SimplificationOptions` with shared budgets and layer switches;
+    record the same options in `SimplificationStep`.
+6. Implement valid-domain restriction through
+    `DiffEqBranch.domain_restrictions` without independent-variable branch
+    creation.
+7. Add stable canonical fingerprints and ensure fixed-point checks use them.
+8. Turn divisibility results into proof facts and implement certified
+    cancellation with branch restrictions.
+9. Wire assumption-aware `SYMBOLIC_RULE_GROUPS` into the branch pass.
+10. Implement duplicate/scalar-multiple system relations using canonical
+    residuals.
+11. Implement conservative substitutions and mandatory post-substitution local
+    and assumption-aware passes.
+12. Add `AtomTable` and Nemo-backed polynomial operations for classified
     regions.
-11. Add optional branch splitting and differential consequences only after
+13. Add optional dependent-variable branch splitting and differential
+    consequences only after
     their history, regularity, and solution-set semantics are tested.
 
 This order produces useful behavior at every step and keeps the implementation
