@@ -106,7 +106,7 @@ Each element of `branches` should be constructed from immutable containers
 (tuples for vectors, immutable domain/restriction snapshots, and copied
 metadata). The implementation can use an internal immutable named tuple with
 the fields `identifier`, `ivs`, `dvs`, `ps`, `eqs`, `bcs`, `domain`,
-`undefined_domain`, `domain_set`, `restrictions`, and `name`; it should not store mutable
+`domain_set`, `restrictions`, and `name`; it should not store mutable
 `DiffEqBranch` objects inside the root.
 
 Conceptually, the `DiffEqSystem` proposal therefore becomes (preserving the
@@ -216,64 +216,53 @@ expression size or branch count. A limit is not a simplification result:
 when reached, the implementation keeps the last stable result and records a
 diagnostic rather than returning an incomplete success-shaped transformation.
 
-### 1.5 Undefined independent-variable regions
+### 1.5 Domain validity without duplicated state
 
 This design does not fracture a system into branches for independent-variable
 conditions. If an equation is only defined on part of its current symbolic
-domain, the branch domain is restricted to the valid part and the discarded
-part is recorded as an undefined region.
+domain, the one authoritative operational value is `branch.domain`, which is
+replaced by its intersection with the valid region.
 
-The undefined region belongs on `DiffEqBranch`, not on `DiffEqSystem`.
-Validity can differ between branches after dependent-variable case splitting,
-and a branch is the object that owns the equations, domain, restrictions, and
-history to which the validity statement applies. `DiffEqSystem` should only
-aggregate branches; it should not try to maintain one global undefined region
-whose meaning could differ for each branch.
+Do **not** add an `undefined_domain` field. It would duplicate constraints
+already represented by `domain`, and every simplification pass would have to
+carry, normalize, fingerprint, and copy both sets. The discarded region is not
+needed by ModelingToolkit or a numerical solver because it is not another
+valid problem to solve.
 
-The existing `SymbolicDomain` is the correct representation for both pieces:
+The immutable `SimplificationRoot` retains the original input domain for
+provenance. Therefore, when a caller needs to inspect what was excluded, it
+can compare the root branch domain with the current branch domain. This
+comparison is meaningful only as provenance: the root is never fed into
+transformation or proof routines, and only the current `branch.domain` is
+used operationally.
 
-```julia
-mutable struct DiffEqBranch
-    # existing fields
-    domain::SymbolicDomain
-    undefined_domain::SymbolicDomain
-    # remaining existing fields
-end
-```
-
-The field name and mutability can follow the eventual `DiffEqBranch`
-implementation. Initially, its default is an empty domain. The intended
-invariant is:
+If the reason for a restriction must be displayed, it belongs in derivation
+history or an optional diagnostic for the transformation that introduced it,
+not in a second continuously transformed domain field. The normal data flow is:
 
 ```text
-original branch domain =
-    current valid domain
-    union undefined_domain
+root domain: immutable provenance only
+branch.domain: one current, solver-facing valid domain
+history/diagnostic: optional explanation of why branch.domain narrowed
 ```
-
-The two pieces should be disjoint when the undefined region is known exactly.
-If only an over-approximation is available, it must be recorded as such in
-diagnostics rather than presented as an exact complement.
 
 For example, a real equation containing `log(g(x))` should become:
 
 ```text
-branch.domain           := branch.domain ∩ {g(x) > 0}
-branch.undefined_domain := branch.undefined_domain ∪
-                           (old_domain ∩ {g(x) <= 0})
+branch.domain := branch.domain ∩ {g(x) > 0}
 ```
 
-The undefined region is not a solution branch. The original equation has no
-real meaning there, so it must not be sent to a solver as a second system.
-Likewise, simplifying `(x^2 - 1)/(x - 1)` to `x + 1` requires `x != 1`;
-without that fact, the rewrite is rejected rather than creating an
-independent-variable branch. If the equation's original domain already
-excludes `x = 1`, the rewrite is safe and no new undefined region is added.
+The region where `g(x) <= 0` is not another solution branch and is not stored
+as a second symbolic constraint set. It can be reconstructed relative to the
+root when needed, or omitted because it has no solver-facing meaning. Likewise,
+simplifying `(x^2 - 1)/(x - 1)` to `x + 1` requires `x != 1`; without that
+fact, the rewrite is rejected rather than creating an independent-variable
+branch.
 
 This policy is aligned with the project goal of producing systems that can be
 passed to ModelingToolkit and numerical solvers. Those consumers receive one
-valid symbolic problem per branch, together with domain metadata, instead of a
-combinatorial collection of artificial region-wise systems.
+valid symbolic problem per branch, together with one domain value, instead of
+a combinatorial collection of artificial region-wise systems.
 
 ### 1.6 Results and diagnostics
 
@@ -435,10 +424,10 @@ additional types have distinct roles:
 Do not add separate persistent structs for generic rewrite candidates,
 diagnostics, solution pieces, guards, domain pieces, or complexity contexts.
 Rewrite candidates and diagnostics are pass-local values. Independent-variable
-conditions use `SymbolicDomain` and `DiffEqBranch.undefined_domain`; dependent
-variable conditions use `DiffEqBranch.restrictions`. Resource limits and policy
-use `SimplificationOptions`. This prevents several objects from representing
-the same concept under different names.
+conditions use the single `SymbolicDomain` stored in `DiffEqBranch.domain`;
+dependent-variable conditions use `DiffEqBranch.restrictions`. Resource limits
+and policy use `SimplificationOptions`. This prevents several objects from
+representing the same concept under different names.
 
 ## 3. Layer 1: local equation simplification
 
@@ -720,23 +709,22 @@ and later stronger polynomial or constraint methods.
 ### 4.2.1 Domain validity is restriction, not splitting
 
 When a recognized operation is undefined outside a part of the independent
-variable domain, restrict the current branch and record the discarded region
-in `branch.undefined_domain`. Do not create a second `DiffEqBranch` for the
-discarded region. It is not a second solution family of the original equation.
+variable domain, restrict the current branch's `domain`. Do not create a
+second `DiffEqBranch` or a second domain field for the discarded region. It is
+not a second solution family of the original equation.
 
 ```julia
-function _restrict_to_valid_domain(branch, valid, undefined)
+function _restrict_to_valid_domain(branch, valid)
     branch.domain = intersect(branch.domain, valid)
-    branch.undefined_domain = union(branch.undefined_domain, undefined)
     branch
 end
 ```
 
 For a real `log(g(x))`, this means intersecting the current domain with
-`g(x) > 0` and recording the current-domain portion satisfying `g(x) <= 0` as
-undefined. The invalid region must not be passed to ModelingToolkit or a
+`g(x) > 0`. The invalid region must not be passed to ModelingToolkit or a
 numerical solver as another equation system. If the valid domain is unknown,
-the operation is not applied.
+the operation is not applied. The immutable root remains available if
+provenance code later needs to compare the original and current domains.
 
 This is deliberately narrower than general piecewise-domain analysis. Domain
 fracturing, interface matching, and region-wise solution reconstruction are
@@ -839,7 +827,7 @@ Only dependent-variable case splitting is part of this plan. It is a system
 operation because it changes the `branches` vector, even though the reason for
 a split is found while processing one branch. It should use the existing
 `push_branch!` and fingerprint logic. Independent-variable conditions update
-`domain` and `undefined_domain` on the current branch; they never create
+the single current `domain` on the branch; they never create
 branches.
 
 For a factor `g`, a permitted split is:
@@ -1163,7 +1151,7 @@ individual rewrites.
 - refusal to cancel unknown or potentially zero factors;
 - cancellation using explicit branch restrictions;
 - denominator side-condition preservation;
-- valid-domain restriction and recording of `undefined_domain`;
+- valid-domain restriction through the single current branch domain;
 - function rules with sufficient and insufficient sign/reality assumptions;
 - branch splitting, deduplication, and branch limits;
 - immutable root preservation through branch transformations;
@@ -1177,7 +1165,7 @@ individual rewrites.
 - polynomial elimination through a reversible `AtomTable`;
 - inconsistent and redundant branch handling;
 - preservation of boundary conditions and branch metadata;
-- preservation of `root`, `domain`, and `undefined_domain`;
+- preservation of `root` and the current branch domain;
 - differential-consequence mode disabled by default and gated when enabled.
 
 Each accepted transformation needs an appropriate check:
@@ -1189,10 +1177,11 @@ system: relation certificate or explicit branch decomposition
 ```
 
 Domain restriction is checked separately: the new `domain` must be the old
-domain intersected with the equation's known valid region, and the removed
-part must be added to `undefined_domain`. A domain restriction is not a
-solution-set decomposition and therefore does not require a system relation
-or a new branch.
+domain intersected with the equation's known valid region. The removed part is
+not a solution-set decomposition and is therefore not stored or passed to a
+solver. The immutable root remains available for optional provenance
+comparisons, and the restriction can be recorded in transformation history or
+diagnostics if that explanation is needed.
 
 ## 9. Implementation order
 
@@ -1206,8 +1195,8 @@ or a new branch.
     classification and nonlinear atom preservation.
 5. Expand `SimplificationOptions` with shared budgets and layer switches;
     record the same options in `SimplificationStep`.
-6. Add `undefined_domain` to `DiffEqBranch` and implement valid-domain
-    restriction without independent-variable branch creation.
+6. Implement valid-domain restriction through `DiffEqBranch.domain` without
+    independent-variable branch creation.
 7. Add stable canonical fingerprints and ensure fixed-point checks use them.
 8. Turn divisibility results into proof facts and implement certified
     cancellation with branch restrictions.
