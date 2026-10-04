@@ -41,6 +41,94 @@ It accepts one system and returns one new `DiffEqSystem`. A system may contain
 multiple `DiffEqBranch` values because branches represent a union of solution
 sets, but the simplifier does not create a second independent system context.
 
+## How to use this document as a VS Code task list
+
+The checkboxes in the task blocks below are implementation tasks. The
+surrounding sections are the design reference for completing them; ordinary
+bullets elsewhere in the document are explanatory lists, not tasks.
+
+Recommended extension: **Todo+**
+
+Install it from the VS Code Extensions view by searching for `Todo+`, or run:
+
+```text
+ext install fabiospampinato.vscode-todo-plus
+```
+
+Todo+ provides `Todo: Toggle Done` and `Todo: Archive`. It supports Markdown
+checkbox symbols, and its archive command moves completed tasks into an
+`Archive` section. Configure it to recognize this file as the Todo+ file and
+to preserve Markdown checkbox syntax:
+
+```json
+{
+    "todo.file.name": "Simplification_plan.md",
+    "todo.symbols.box": "[ ]",
+    "todo.symbols.done": "[x]",
+    "todo.symbols.cancelled": "[-]",
+    "todo.archive.name": "Archive"
+}
+```
+
+The exact setting behavior can vary with the installed Todo+ version. If the
+extension does not recognize a `.md` file through `todo.file.name`, add the
+file to `todo.file.include` instead:
+
+```json
+{
+    "todo.file.include": ["Simplification_plan.md"]
+}
+```
+
+Check a task with Todo+'s `Todo: Toggle Done` command (or the configured
+shortcut), then run `Todo: Archive` to move all completed task lines into the
+`Archive` section. There is no need for a repository script: Todo+ already
+provides the requested move operation. `Markdown All in One` remains useful
+for Markdown editing, but it does not provide this archive workflow.
+
+### Task block: architecture and state
+
+- [ ] Add immutable `SimplificationRoot` snapshots to `DiffEqSystem`.
+- [ ] Preserve the root when constructing transformed systems.
+- [ ] Add `original_domain` and `domain_restrictions` to branch state without storing a second effective-domain copy.
+- [ ] Implement `_effective_domain(branch)` and invalidate the existing interval cache when restrictions change.
+- [ ] Record the source of added domain restrictions in transformation history or diagnostics.
+
+### Task block: local simplification
+
+- [ ] Refactor `simplify_system` into explicit local stages while preserving the current public entry point.
+- [ ] Implement residual canonicalization and identity/contradiction classification.
+- [ ] Refactor `group_coefficients` into a generator-relative collector.
+- [ ] Preserve transcendental, rational, algebraic, and opaque differential dependence when polynomial collection is not valid.
+- [ ] Add derivative-expansion and expression-size budgets.
+- [ ] Add stable canonical fingerprints for local fixed-point checks.
+
+### Task block: assumption-aware simplification
+
+- [ ] Turn divisibility results into proof facts with proven, disproven, and unknown outcomes.
+- [ ] Implement certified cancellation using branch restrictions.
+- [ ] Wire assumption-aware `SYMBOLIC_RULE_GROUPS` into the branch pass.
+- [ ] Reject independent-variable rewrites when their validity condition cannot be proved or recorded as a domain restriction.
+- [ ] Keep dependent-variable case splitting explicit and disabled by default.
+
+### Task block: system reduction
+
+- [ ] Implement duplicate and scalar-multiple relation detection using canonical residuals.
+- [ ] Implement conservative substitutions with explicit pivot conditions.
+- [ ] Re-run local and assumption-aware simplification after every accepted substitution batch.
+- [ ] Add the reversible `AtomTable` needed for classified polynomial regions.
+- [ ] Add Nemo-backed factorization and elimination only for supported polynomial regions.
+- [ ] Keep differential consequences opt-in and require documented regularity semantics.
+
+### Task block: verification
+
+- [ ] Test derivative expansion, mixed derivatives, and higher derivatives.
+- [ ] Test nonlinear differential atoms such as `exp(u')` and `sin(u'')`.
+- [ ] Test domain restrictions, provenance, and cache invalidation.
+- [ ] Test dependent-variable branch splitting, deduplication, and branch limits.
+- [ ] Test system substitutions followed by local recollection.
+- [ ] Test preservation of `DiffEqSystem` metadata and `SimplificationStep(options)`.
+
 ## 1. Existing architecture and design decisions
 
 ### 1.1 `DiffEqSystem` is the orchestration boundary
@@ -1219,12 +1307,12 @@ assumption-aware: equivalence under proven facts and side conditions
 system: relation certificate or explicit branch decomposition
 ```
 
-Domain restriction is checked separately: the new `domain` must be the old
-domain intersected with the equation's known valid region. The removed part is
+Domain restriction is checked separately: the new effective domain must be
+`original_domain` plus the accepted `domain_restrictions`. The removed part is
 not a solution-set decomposition and is therefore not stored or passed to a
 solver. The immutable root remains available for optional provenance
-comparisons, and the restriction can be recorded in transformation history or
-diagnostics if that explanation is needed.
+comparisons, and the restriction source can be recorded in transformation
+history or diagnostics if that explanation is needed.
 
 ## 9. Implementation order
 
@@ -1259,3 +1347,9 @@ This order produces useful behavior at every step and keeps the implementation
 aligned with the existing architecture: one `DiffEqSystem` is simplified at a
 time, branches carry assumptions and history, and `SimplificationOptions`
 describes and records the complete run.
+
+## Archive
+
+Todo+ moves completed task lines here when `Todo: Archive` is run. Keep this
+section at the end of the document so archived work remains separate from the
+active task blocks and the design reference.
