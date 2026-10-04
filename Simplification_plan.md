@@ -62,7 +62,7 @@ to preserve Markdown checkbox syntax:
 
 ```json
 {
-    "todo.file.name": "Simplification_plan.md",
+    "todo.file.include": ["**/Simplification_plan.md"],
     "todo.symbols.box": "[ ]",
     "todo.symbols.done": "[x]",
     "todo.symbols.cancelled": "[-]",
@@ -70,15 +70,12 @@ to preserve Markdown checkbox syntax:
 }
 ```
 
-The exact setting behavior can vary with the installed Todo+ version. If the
-extension does not recognize a `.md` file through `todo.file.name`, add the
-file to `todo.file.include` instead:
-
-```json
-{
-    "todo.file.include": ["Simplification_plan.md"]
-}
-```
+`todo.file.name` is intended for Todo+'s own supported todo-file names; use
+`todo.file.include` for this Markdown file. These settings can be placed in
+VS Code's User Settings if they should apply everywhere, or in the repository's
+`.vscode/settings.json` if the project should carry the setup for every
+contributor. The latter is optional and should only be committed if the
+repository wants to standardize on Todo+.
 
 Check a task with Todo+'s `Todo: Toggle Done` command (or the configured
 shortcut), then run `Todo: Archive` to move all completed task lines into the
