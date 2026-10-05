@@ -5,29 +5,28 @@ This document is the implementation template for simplification in
 `DiffEqSystem`/`DiffEqBranch` architecture rather than around independent
 expression-processing utilities.
 
-The planned simplifier has three layers:
+The planned simplifier has two architectural levels:
 
-1. **Local equation simplification:** normalize each equation without using
-   sibling equations or changing its domain.
-2. **Assumption-aware simplification:** use the selected branch's domain and
-   restrictions to justify cancellations and branch-sensitive identities.
-3. **System reduction:** use relationships between equations to remove
-   redundancy, substitute, and eliminate.
+1. **Branch simplification:** normalize equations while carrying the branch's
+   domain, restrictions, proof state, and resource policy through every stage.
+   There is no separate non-aware simplifier; local expression work and
+   assumption-aware decisions are one integrated pipeline.
+2. **System reduction:** use relationships between equations to remove
+   redundancy, substitute, and eliminate, then send every changed branch back
+   through the integrated branch pipeline.
 
-The layers are not three unrelated modes. They are nested operations on one
+These are not unrelated modes. They are nested operations on one
 `DiffEqSystem`:
 
 ```text
 one DiffEqSystem
     |
     +-- for each branch:
-    |       local simplification
-    |       assumption-aware simplification
+    |       integrated branch simplification
     |
     +-- system-wide relation discovery/reduction
             |
-            +-- local simplification of changed equations
-            +-- assumption-aware simplification of changed branches
+            +-- integrated simplification of changed branches
             +-- repeat until the system is stable
 ```
 
@@ -47,7 +46,7 @@ sets, but the simplifier does not create a second independent system context.
 - [ ] Preserve the root when constructing transformed systems.
 - [ ] Record the source of added domain restrictions in transformation history or diagnostics.
 
-### Task block: local simplification
+### Task block: integrated branch simplification
 
 - [ ] Refactor `simplify_system` into explicit local stages while preserving the current public entry point.
 - [ ] Implement residual canonicalization and identity/contradiction classification.
@@ -55,12 +54,9 @@ sets, but the simplifier does not create a second independent system context.
 - [ ] Preserve transcendental, rational, algebraic, and opaque differential dependence when polynomial collection is not valid.
 - [ ] Add derivative-expansion and expression-size budgets.
 - [ ] Add stable canonical fingerprints for local fixed-point checks.
-
-### Task block: assumption-aware simplification
-
 - [ ] Turn divisibility results into proof facts with proven, disproven, and unknown outcomes.
 - [ ] Implement certified cancellation using branch restrictions.
-- [ ] Wire assumption-aware `SYMBOLIC_RULE_GROUPS` into the branch pass.
+- [ ] Wire assumption-checked `SYMBOLIC_RULE_GROUPS` into the branch pass.
 - [ ] Reject independent-variable rewrites when their validity condition cannot be proved or recorded as a domain restriction.
 - [ ] Keep dependent-variable case splitting explicit and disabled by default.
 
@@ -68,7 +64,7 @@ sets, but the simplifier does not create a second independent system context.
 
 - [ ] Implement duplicate and scalar-multiple relation detection using canonical residuals.
 - [ ] Implement conservative substitutions with explicit pivot conditions.
-- [ ] Re-run local and assumption-aware simplification after every accepted substitution batch.
+- [ ] Re-run integrated branch simplification after every accepted substitution batch.
 - [ ] Add the reversible `AtomTable` needed for classified polynomial regions.
 - [ ] Add Nemo-backed factorization and elimination only for supported polynomial regions.
 - [ ] Keep differential consequences opt-in and require documented regularity semantics.
@@ -190,6 +186,7 @@ Base.@kwdef struct SimplificationOptions
     max_branches::Int = 256
     max_nodes::Int = 100_000
     max_derivative_nodes::Int = 50_000
+    max_expansion_nodes::Int = 50_000
 
     expand_derivatives::Bool = true
     expand_products::Bool = true
@@ -219,7 +216,7 @@ The two pass limits have different scopes:
   changes an equation and the changed form could expose more local work.
 - `max_system_passes` limits the **outer system-reduction loop**. One system
   pass discovers and applies relationships between equations in a branch, then
-  reruns local and assumption-aware simplification on the affected branches.
+  reruns the integrated branch simplifier on the affected branches.
   A new system pass is needed only if that cleanup exposes another
   substitution, redundancy, or elimination relation.
 
@@ -237,6 +234,9 @@ The other limits have similarly different scopes:
   post-reduction expressions.
 - `max_derivative_nodes` is the stricter limit for the temporary result of
   derivative expansion, which is especially prone to combinatorial growth.
+- `max_expansion_nodes` limits each accepted algebraic distribution result;
+  it prevents one selected product-of-sums region from consuming the entire
+  run's expression budget.
 - `max_branches` limits the number of solution-set branches after optional
   dependent-variable case splitting. It does not control domain restriction,
   because this design does not create branches for independent-variable
@@ -510,21 +510,24 @@ conditions use `DiffEqBranch.original_domain` plus its
 `SimplificationOptions`. This prevents several objects from representing the
 same concept under different names.
 
-## 3. Layer 1: local equation simplification
+## 3. Integrated branch simplification
 
 ### 3.1 Role and contract
 
-Local simplification transforms one equation using only:
+The branch simplifier transforms one branch using:
 
 - the equation itself;
 - the selected branch's variable declarations;
-- unconditional symbolic rules;
+- the branch's effective domain and restrictions;
+- proof facts established during this run;
+- unconditional and assumption-checked symbolic rules;
 - the current local resource limits.
 
-It does not use another equation as a substitution rule, and it does not
-divide by a factor merely because the factor appears common. Its output is a
-locally equivalent equation or a classification as identity, contradiction, or
-parameter-only condition.
+It does not use another equation as a substitution rule. Every potentially
+unsafe rewrite is checked in the same pipeline rather than deferred to a
+second simplifier. Its output is an equivalent branch, a deliberately
+restricted branch when an expression has a smaller valid domain, or a
+classification as identity, contradiction, or parameter-only condition.
 
 The branch-level caller applies this operation to every `eqs` entry and every
 boundary-condition side.
@@ -535,79 +538,152 @@ boundary-condition side.
 branch
   |
   v
+create branch-local proof state and effective domain
+  |
+  v
 normalize each equation to a residual
   |
   v
-expand derivatives, subject to node budget
-  |
-  v
-normalize arithmetic and selected products
+expand derivatives and selected algebraic regions
   |
   v
 classify differential generators and nonlinear atoms
   |
   v
-collect valid generator powers
+collect valid generator powers and simplify coefficients
   |
   v
-simplify coefficients and ordinary subexpressions
+discover assumption-sensitive candidates
   |
   v
-apply unconditional structural rules
-  |
-  v
-recollect and canonicalize
-  |
-  v
-classify identities and contradictions
+prove obligations, add valid domain restrictions, and apply safe rules
+|
+v
+recollect, canonicalize, and classify
 ```
 
 The final recollection is intentional. Coefficient simplification can expose
 new common terms, and structural rules can expose new generator powers.
 
-### 3.3 Derivative expansion
+### 3.3 Expansion policy
 
-The existing `expand_derivatives` operation is the foundation for this stage.
-It exposes product and chain rules so later collection sees actual
-derivatives:
+Expansion is not one operation on the whole expression. It is a controlled
+rewrite used only when exposing additive terms or derivative generators will
+enable a later stage. Unrestricted `expand(expr)` is unsafe as the default:
+it can distribute across a large product, expand powers unnecessarily, and
+expand function arguments without helping collection or solving.
 
-```text
-D(a(x)u') -> a(x)u'' + a'(x)u'
+The implementation should inspect the expression tree and divide it into
+**algebraic regions**. A region is a maximal subexpression built from
+addition, multiplication, integer powers, numeric constants, and expressions
+that are being treated as atoms for the current operation. The following are
+not algebraic regions for product expansion:
+
+- arguments of `sin`, `cos`, `exp`, `log`, `abs`, and other registered
+  functions;
+- denominators and negative powers, unless a rational operation explicitly
+  requests them;
+- opaque or unsupported operations;
+- a subexpression containing a derivative generator that the requested
+  collector cannot represent polynomially.
+
+For each candidate region, compute a reason and an estimated cost before
+rewriting it. This can be a pass-local named tuple rather than another
+persistent type:
+
+```julia
+candidate = (
+    region = region,
+    reason = :term_collection,
+    estimated_nodes = estimated_nodes,
+    required_generators = generators,
+)
 ```
 
-The stage must:
+The candidate is accepted only when all of the following hold:
 
-- expand only when `expand_derivatives` is enabled;
-- measure the candidate node count before accepting it;
-- preserve the previous expression if the derivative budget is exceeded;
-- use the project's convention for commuting mixed derivatives;
-- leave unsupported registered functions intact.
+1. **Benefit:** the region contains an additive/multiplicative boundary that
+   a later stage needs, such as a product of sums, or it hides a derivative
+   generator needed for collection.
+2. **Safety:** the rewrite is an unconditional algebraic identity under the
+   current symbolic semantics. No denominator is cleared and no
+   branch-sensitive function identity is used.
+3. **Budget:** the estimated result is below both `max_nodes` and the
+   expansion-specific `max_expansion_nodes` limit.
+4. **Priority:** expanding this region is more useful than preserving its
+   current compact form according to `normal_form` and the downstream
+   collector/reducer.
 
-Derivative expansion is done before generator collection because collection of
-an unexpanded derivative would miss terms produced by product and chain rules.
-It is not repeated unconditionally at every substage; the local loop calls a
-single stage and only repeats if a later rewrite created a new derivative
-expression.
+A practical selection algorithm is:
+
+```julia
+function _expand_selected_regions(expr, branch, options)
+    candidates = _find_expansion_candidates(expr, branch, options)
+    candidates = filter(_beneficial_and_safe, candidates)
+    candidates = sort(candidates; by = c -> _expansion_priority(c, options),
+                      rev = true)
+
+    current = expr
+    for candidate in candidates
+        proposed = _expand_region(current, candidate.region)
+        _within_expansion_budget(proposed, current, options) || continue
+        current = _replace_region(current, candidate.region, proposed)
+    end
+    current
+end
+```
+
+The traversal must be bottom-up and must re-evaluate candidates after an
+accepted replacement. A parent and child candidate must not both be expanded
+from stale tree locations. Each accepted replacement is locally simplified
+before the next candidate is considered, so the implementation can reject
+growth that disappears after coefficient normalization.
+
+Use these expansion targets in order:
+
+1. **Derivative visibility:** use `expand_derivatives` on derivative
+   applications whose product/chain rule result exposes generators relevant to
+   this branch. For example, expose the terms in
+   `D(a(x)u') -> a(x)u'' + a'(x)u'` before collection.
+2. **Term collection:** distribute only products of sums that contain
+   relevant differential generators or that prevent additive residual
+   canonicalization.
+3. **Factor access:** expand a small polynomial region only when certified
+   factorization, gcd, or system-reduction logic explicitly requests the
+   expanded representation.
+
+Do not expand merely because an expression is algebraically expandable. In
+particular, preserve `sin(a + b)`, `exp(a + b)`, powers of large sums, and
+products whose estimated distribution would multiply term counts without
+exposing a needed generator. Function expansion rules belong to the
+assumption-checked rewrite stage and must be selected by their own proof and
+cost policy, not by this algebraic expansion pass.
+
+Derivative expansion and algebraic distribution have separate budgets:
+`max_derivative_nodes` limits temporary derivative expansion, while
+`max_expansion_nodes` limits each selected algebraic distribution result.
+Derivative expansion runs first because it can reveal the regions that matter;
+the selected algebraic pass then works on the resulting tree. If either
+candidate exceeds its budget, retain the previous expression and continue
+with collection on the compact form. This is a deliberate graceful fallback:
+an opaque or unexpanded term can still be preserved as an atom.
 
 ### 3.4 Arithmetic normalization
 
-Use `simplify` for general local cleanup and `expand` for selected algebraic
-regions when distribution is needed for collection:
+Use `simplify` for local cleanup before candidate discovery and after every
+accepted regional expansion. Do not write `simplify(expr); expand(expr)` as the
+pipeline, because that loses the reason for expansion and makes the cost
+unbounded:
 
 ```julia
 expr = simplify(expr)
-options.expand_products && (expr = expand(expr))
+expr = _expand_selected_regions(expr, branch, options)
 expr = simplify(expr)
 ```
 
-The implementation should not expand transcendental arguments by default.
-`sin(a + b)` and `exp(a + b)` are normally preserved because function
-expansion can increase size and may not be a simplification for downstream
-consumers.
-
-The purpose of this stage is to expose additive terms and multiplicative
-factors. It is not to select the final factored or expanded display form;
-`normal_form` controls that final policy.
+The purpose of this stage is to expose only the additive terms and
+multiplicative factors required by collection. It is not to select the final
+factored or expanded display form; `normal_form` controls that final policy.
 
 ### 3.5 Generator collection
 
@@ -653,20 +729,21 @@ stage may simplify:
 but it must not treat that coefficient as an ordinary function of `x` when a
 later stage decides whether solving or cancellation is safe.
 
-No symbolic division by a potentially zero expression occurs here. That is the
-responsibility of Layer 2.
+No symbolic division by a potentially zero expression occurs here. The next
+assumption-checked stage in this same branch pipeline is responsible for
+proving such a factor nonzero.
 
 ### 3.7 Structural rules
 
 The existing `SPECIAL_REWRITER` is the initial structural rule set. It
-contains derivative ordering and registered special-function behavior. Layer 1
-may use rules that are unconditional under the project's declared symbolic
-semantics.
+contains derivative ordering and registered special-function behavior. The
+integrated branch pipeline may use a rule immediately when it is unconditional
+or after its obligations are proven from the branch.
 
-The rule groups in `symbolic_rules.jl` are not all Layer 1 rules. Rules for
-logs, powers, absolute values, and trigonometric expressions can depend on
-sign, reality, integrality, or branch assumptions and therefore belong in
-Layer 2.
+The rule groups in `symbolic_rules.jl` therefore do not define separate
+architectural layers. Rules for logs, powers, absolute values, and
+trigonometric expressions are simply candidates whose sign, reality,
+integrality, or branch obligations must be checked before application.
 
 ### 3.8 Canonicalization and classification
 
@@ -725,17 +802,19 @@ function _simplify_equation_local(eq, branch, options)
 end
 ```
 
-`_simplify_branch_local` calls this helper for every equation and boundary
-condition, reconstructs a `DiffEqBranch` with the existing metadata, and
-returns diagnostics. It does not append history by itself; the outer
-`simplify_system` call appends one `SimplificationStep(options)` when the
-complete requested run changes the branch.
+`_run_unconditional_branch_stages` calls this helper for every equation and
+boundary condition, reconstructs a `DiffEqBranch` with the existing metadata,
+and returns diagnostics to the integrated branch pass. It does not append
+history by itself; the outer `simplify_system` call appends one
+`SimplificationStep(options)` when the complete requested run changes the
+branch.
 
-## 4. Layer 2: assumption-aware simplification
+## 4. Proof and restriction stages within branch simplification
 
 ### 4.1 Role and contract
 
-Layer 2 is still branch-local, but it may use:
+These stages are part of the integrated branch simplifier, not a second
+simplification layer. They may use:
 
 - `_effective_domain(branch)`;
 - `branch.restrictions`;
@@ -743,10 +822,12 @@ Layer 2 is still branch-local, but it may use:
 - interval/domain caches;
 - facts proven during this simplification run.
 
-Its purpose is to perform transformations that are mathematically valid only
+Their purpose is to perform transformations that are mathematically valid only
 under facts that are not visible from the expression alone. Examples include
 dividing by a factor, removing an absolute value, combining logarithms, and
-using some power identities.
+using some power identities. They run after candidate expressions have been
+normalized enough to expose these opportunities, and any accepted rewrite
+returns to collection and canonicalization before the branch pass continues.
 
 An unknown fact is not permission to rewrite. The result is either:
 
@@ -933,27 +1014,32 @@ because every child must eventually be solved and the solution sets unioned.
 ### 4.7 Assumption-aware pseudocode
 
 ```julia
-function _simplify_branch_assumption_aware(branch, options)
-    assumptions = _assumption_state(branch)
-    current = _simplify_branch_local(branch, options)
+function _simplify_branch(branch, options)
+    current = [branch]
 
     for _ in 1:options.max_passes
-        before = _branch_fingerprint(current.branch)
-        candidates = _discover_assumption_candidates(
-            current.branch, assumptions, options)
-        outcomes = _apply_proven_candidates_or_split(
-            current.branch, candidates, assumptions, options)
+        next = DiffEqBranch[]
+        for current_branch in current
+            assumptions = _assumption_state(current_branch)
+            normalized = _run_unconditional_branch_stages(
+                current_branch, assumptions, options)
+            candidates = _discover_assumption_candidates(
+                normalized.branch, assumptions, options)
+            outcomes = _apply_proven_candidates_or_split(
+                normalized.branch, candidates, assumptions, options)
 
-        normalized = DiffEqBranch[]
-        for outcome in outcomes
-            result = _simplify_branch_local(outcome, options)
-            push!(normalized, result.branch)
+            for outcome in outcomes
+                outcome_assumptions = _assumption_state(outcome)
+                result = _run_unconditional_branch_stages(
+                    outcome, outcome_assumptions, options)
+                push!(next, result.branch)
+            end
         end
-        normalized = _deduplicate_branches(normalized)
+        next = _deduplicate_branches(next)
 
-        _branch_set_fingerprint(normalized) ==
-            _branch_set_fingerprint([current.branch]) && break
-        current = _select_or_return_branch_results(normalized)
+        _branch_set_fingerprint(next) ==
+            _branch_set_fingerprint(current) && break
+        current = next
     end
 
     current
@@ -961,11 +1047,13 @@ end
 ```
 
 The exact return type can be specialized during implementation, but the
-important interaction is fixed: every accepted assumption-aware rewrite is
-followed by local simplification because cancellation and function rewrites
-can expose new generator or coefficient structure.
+important interaction is fixed: every accepted proof-dependent rewrite is
+followed by recollection and canonicalization in the same branch pass because
+cancellation and function rewrites can expose new generator or coefficient
+structure. This helper is not a second simplifier; it is the
+assumption/proof portion of the integrated branch pipeline.
 
-## 5. Layer 3: system reduction
+## 5. System reduction
 
 ### 5.1 Role and contract
 
@@ -983,29 +1071,29 @@ Its initial scope should be conservative:
 
 Differential consequences, integrability conditions, and differential
 elimination are later capabilities. They are not required for the basic
-local/assumption-aware simplifier and must be opt-in.
+integrated branch simplifier and must be opt-in.
 
 ### 5.2 Why system reduction is interleaved
 
 The layers affect one another:
 
 ```text
-local normalization
+branch normalization
     -> exposes comparable equations and pivots
 system reduction
     -> substitutes or eliminates and creates new expressions
-local normalization
+integrated branch normalization
     -> expands, collects, and canonicalizes those expressions
-assumption-aware simplification
+proof and restriction checks
     -> proves newly exposed cancellations
 system reduction again
     -> discovers relations exposed by cleanup
 ```
 
-Running system reduction only after all local work misses relations exposed by
-substitution. Running it only before local work misses relations hidden by
-different equation layouts. The system pass therefore runs after a local
-fixed point and is followed by local and assumption-aware passes on changed
+Running system reduction only after all branch work misses relations exposed
+by substitution. Running it only before branch work misses relations hidden by
+different equation layouts. The system pass therefore runs after a branch
+fixed point and is followed by the integrated branch simplifier on changed
 branches.
 
 ### 5.3 Relation records
@@ -1167,8 +1255,8 @@ copy system and preserve original histories
     |
     v
 for every branch:
-    local fixed point on equations and boundary conditions
-    assumption-aware fixed point
+    branch simplification fixed point on equations and boundary conditions
+    proof/restriction checks interleaved with each pass
     classify identity/contradiction/conditions
     |
     v
@@ -1176,8 +1264,7 @@ if system reduction is enabled:
     repeat until system fixed point:
         discover relations across equations in each branch
         apply one safe relation batch
-        locally simplify changed equations
-        assumption-aware simplify changed branches
+        run integrated branch simplification on changed branches
         classify and deduplicate
     |
     v
@@ -1217,7 +1304,7 @@ branch.
 Tests should follow the architecture and verify interactions, not only
 individual rewrites.
 
-### Local layer
+### Integrated branch simplification
 
 - product and chain-rule derivative expansion;
 - mixed and higher derivatives;
@@ -1228,7 +1315,7 @@ individual rewrites.
 - identity, contradiction, and parameter-condition classification;
 - derivative and expression node budgets.
 
-### Assumption-aware layer
+### Proof, restriction, and branch behavior
 
 - cancellation of proven nonzero numeric and parameter factors;
 - refusal to cancel unknown or potentially zero factors;
@@ -1255,8 +1342,7 @@ individual rewrites.
 Each accepted transformation needs an appropriate check:
 
 ```text
-local: residual canonicalization/equivalence
-assumption-aware: equivalence under proven facts and side conditions
+branch: residual canonicalization/equivalence under the branch's proven facts and side conditions
 system: relation certificate or explicit branch decomposition
 ```
 
@@ -1270,14 +1356,15 @@ history or diagnostics if that explanation is needed.
 ## 9. Implementation order
 
 1. Keep `simplify_system` as the public orchestration entry point and refactor
-   its current helpers into explicit local stages.
+   its current helpers into explicit integrated branch stages.
 2. Add immutable `SimplificationRoot` snapshots to `DiffEqSystem` construction
    and copying before transformations are implemented.
 3. Implement residual canonicalization and identity/contradiction
    classification while preserving `DiffEqBranch` metadata.
 4. Refactor `group_coefficients` into a safe collector with differential-term
    classification and nonlinear atom preservation.
-5. Expand `SimplificationOptions` with shared budgets and layer switches;
+5. Expand `SimplificationOptions` with shared budgets and branch/system policy
+   switches;
    record the same options in `SimplificationStep`.
 6. Implement valid-domain restriction through
    `DiffEqBranch.domain_restrictions` without independent-variable branch
@@ -1285,11 +1372,12 @@ history or diagnostics if that explanation is needed.
 7. Add stable canonical fingerprints and ensure fixed-point checks use them.
 8. Turn divisibility results into proof facts and implement certified
    cancellation with branch restrictions.
-9. Wire assumption-aware `SYMBOLIC_RULE_GROUPS` into the branch pass.
+9. Wire assumption-checked `SYMBOLIC_RULE_GROUPS` into the integrated branch
+   pass.
 10. Implement duplicate/scalar-multiple system relations using canonical
     residuals.
-11. Implement conservative substitutions and mandatory post-substitution local
-    and assumption-aware passes.
+11. Implement conservative substitutions and mandatory post-substitution
+    integrated branch passes.
 12. Add `AtomTable` and Nemo-backed polynomial operations for classified
     regions.
 13. Add optional dependent-variable branch splitting and differential
