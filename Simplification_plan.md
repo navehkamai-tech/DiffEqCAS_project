@@ -53,6 +53,7 @@ sets, but the simplifier does not create a second independent system context.
 - [ ] Refactor `group_coefficients` into a generator-relative collector.
 - [ ] Preserve transcendental, rational, algebraic, and opaque differential dependence when polynomial collection is not valid.
 - [ ] Add derivative-expansion and expression-size budgets.
+- [ ] Implement rollback and diagnostics for candidate, input, and temporary expression-size overflow.
 - [ ] Add stable canonical fingerprints for local fixed-point checks.
 - [ ] Turn divisibility results into proof facts with proven, disproven, and unknown outcomes.
 - [ ] Implement certified cancellation using branch restrictions.
@@ -245,6 +246,68 @@ The other limits have similarly different scopes:
 If a limit is reached, the current transformation is rejected or the last
 stable result is returned. A limit must never cause equations, branches, or
 history entries to be silently dropped.
+
+### 1.4.1 Expression-size overflow policy
+
+`max_nodes` is a hard admission limit for an accepted expression, not a
+promise that every input expression is already below the limit. The
+implementation must handle both cases explicitly:
+
+1. **Candidate overflow:** if a rewrite, derivative expansion, distribution,
+   coefficient simplification, or system substitution would produce more than
+   the applicable limit, do not commit that rewrite. Restore the last accepted
+   expression, record the stage, measured size, limit, and reason, and continue
+   with later transformations that can operate on the retained form.
+2. **Input overflow:** if an input equation already exceeds `max_nodes`,
+   preserve it as the branch's starting expression and mark it
+   `:over_budget_input`. The simplifier may attempt bounded
+   size-reducing operations, such as removing a zero term or combining
+   identical terms, but it must not apply an operation whose result is larger
+   than the current expression or launch an unbounded expansion/factorization
+   attempt. If no permitted reduction fits the budget, return the unchanged
+   equation with a diagnostic.
+3. **Temporary overflow:** derivative expansion and selected regional
+   expansion are speculative. Their temporary results may be measured before
+   installation, but they must never be stored in the branch, history, cache,
+   or returned system when they exceed their temporary limit. This is why
+   `max_derivative_nodes` and `max_expansion_nodes` are separate from
+   `max_nodes`.
+
+The size check must occur at every transformation boundary, not only at the
+end of a pass. A transformation is accepted only if its resulting expression
+is within `max_nodes` and the branch-wide total remains within the intended
+resource policy. Use a cheap conservative node estimator before expensive
+backend work, then recompute the exact estimator on the proposed result before
+committing it. If the estimator is uncertain, reject the growth rather than
+assuming it is safe.
+
+Overflow is not an algebraic identity, contradiction, or solver result. It
+must not be encoded as a successful simplification step. The branch remains
+valid but carries a diagnostic such as:
+
+```julia
+(
+    kind = :budget_exceeded,
+    stage = :algebraic_expansion,
+    expression_nodes = 125_000,
+    limit = options.max_nodes,
+    action = :kept_previous,
+)
+```
+
+Diagnostics should identify whether the retained form is the last stable
+candidate or the original over-budget input. They should be available to the
+caller through the eventual reporting API, or at minimum to internal logging
+and tests. `SimplificationStep(options)` records that the run was requested;
+it must not claim that a rejected transformation occurred.
+
+When system reduction is enabled, an over-budget equation cannot be used as a
+pivot or as input to a backend operation that may increase it. The reducer may
+still remove it as an exact duplicate if that comparison is bounded and
+certified. Otherwise it skips the relation, records a diagnostic, and leaves
+the equation in place. After a successful system transformation, every changed
+branch goes through the same admission checks again; one oversized result
+must not cause the whole system or unrelated branches to be discarded.
 
 The exact field names can change during implementation, but the relationship
 must remain: one options value describes one complete call to
@@ -775,14 +838,25 @@ The local helper only reports the classification.
 ```julia
 function _simplify_equation_local(eq, branch, options)
     residual = _simplification_expression(eq)
+    diagnostics = Any[]
     previous = nothing
+
+    if _complexity(residual) > options.max_nodes
+        push!(diagnostics, (
+            kind = :budget_exceeded,
+            stage = :input,
+            action = :size_reducing_only,
+        ))
+    end
 
     for _ in 1:options.max_passes
         previous = residual
 
         if options.expand_derivatives
-            residual = _expand_derivatives_bounded(
+            candidate = _expand_derivatives_bounded(
                 residual, options.max_derivative_nodes)
+            _complexity(candidate) <= options.max_derivative_nodes &&
+                (residual = candidate)
         end
         residual = _normalize_arithmetic(residual, options)
 
@@ -793,12 +867,18 @@ function _simplify_equation_local(eq, branch, options)
         residual = _apply_structural_rules(residual, branch, options)
         residual = _canonicalize_residual(residual, branch, options)
 
-        _complexity(residual) <= options.max_nodes ||
-            return _local_result(previous, :budget_exceeded)
+        if _complexity(residual) > options.max_nodes
+            push!(diagnostics, (
+                kind = :budget_exceeded,
+                stage = :local_pass,
+                action = :kept_previous,
+            ))
+            residual = previous
+        end
         isequal(residual, previous) && break
     end
 
-    _classify_local_result(residual, branch)
+    _classify_local_result(residual, branch; diagnostics)
 end
 ```
 
@@ -1314,6 +1394,10 @@ individual rewrites.
 - deterministic canonical forms;
 - identity, contradiction, and parameter-condition classification;
 - derivative and expression node budgets.
+- candidate rewrites rejected at the node limit;
+- initially over-budget input expressions and size-reducing cleanup;
+- temporary derivative/expansion overflow with rollback and diagnostics;
+- over-budget equations skipped safely by system reduction.
 
 ### Proof, restriction, and branch behavior
 
