@@ -25,6 +25,7 @@ SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 SymbolicUtils = "d1185830-fcd6-423d-90d6-eec64667417b"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
+TermInterface = "8ea1fca8-c5ef-4a55-8b96-4e9afe9c9a3c"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [compat]
@@ -36,3 +37,4 @@ Nemo = "0.56.1"
 Pluto = "1.0.3"
 PlutoUI = "0.7.83"
 StaticArrays = "1.9.22"
+TermInterface = "2.0.0"

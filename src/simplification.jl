@@ -5,12 +5,34 @@ Configuration for the system simplifier.
 The pass limit is deliberately explicit. Simplification can increase
 expression size, so the number of fixed-point passes is bounded.
 """
+Base.@kwdef struct SimplificationOptions
+    max_passes::Int = 4
+    max_system_passes::Int = 4
+    max_branches::Int = 256
+    max_nodes::Int = 100_000
+    max_derivative_nodes::Int = 50_000
 
-struct SimplificationStep <: DerivationStep
-    max_passes::Int
+    expand_derivatives::Bool = true
+    expand_products::Bool = true
+    collect_generators::Bool = true
+    enable_cancellation::Bool = true
+    enable_factorization::Bool = false
+    enable_function_rules::Bool = false
+    enable_system_reduction::Bool = false
+    enable_branch_splitting::Bool = false # dependent-variable cases only
+    enable_differential_consequences::Bool = false
+
+    normal_form::Symbol = :collected
+    reduction_strategy::Symbol = :conservative
 end
 
-_simplification_expression(eq::Symbolics.Equation) = unwrap(eq.lhs - eq.rhs)
+struct SimplificationStep <: DerivationStep
+    options::SimplificationOptions
+end
+
+function _equation_residual(eq::Symbolics.Equation)
+    return (eq.lhs - eq.rhs)~0
+end
 
 """
 Build a system from transformed residual expressions while preserving all
@@ -109,17 +131,33 @@ function _factorization_partition(sys::DiffEqBranch, factors)
     DiffEqBranch[]
 end
 
-function _simplify_branch(sys::DiffEqBranch, max_passes::Int=4)
-    current = DiffEqBranch(
-        eqs=sys.eqs, ivs=sys.ivs, dvs=sys.dvs, ps=sys.ps,
-        bcs=sys.bcs, domain=sys.domain, name=sys.name,
-        domain_set=sys.domain_set,
-        restrictions=[_normalize_restriction(r) for r in sys.restrictions],
-        history=sys.history,
-    )
+_valid_node_count(expr::Symbolics.Num, max_node_count) = robust_node_count(expr)>max_node_count ? false : true
 
+function _attempt_expand_derivatives!(expr::Symbolics.Num, options::SimplificationOptions)
+    options.expand_derivatives==true || return expr
+    expansion_candidate = expand_derivatives(expr, simplify=true)
+    nodes_count = robust_node_count(expansion_candidate)
+    nodes_count >= options.max_derivative_nodes && return expr
+    return expansion_candidate
+end
+
+function _attempt_expand_products!(expr::Symbolics.Num, options::SimplificationOptions)
+    options.expand_products==true || return expr
+    return expand(expr)
+end
+
+function _simplify_branch(sys::DiffEqBranch, options::SimplificationOptions=SimplificationOptions())
+    eq_residuals = [_equation_residual(eq) for eq in sys.eqs]
+    halted_eqs = []
+    #1 expand derivatives
+    [_attempt_expand_derivatives!(residual, options) for residual in eq_residuals]
+    #2 distribute multiplication
+    [_attempt_expand_products!(residual, options) for residual in eq_residuals]
+    for idx in 1:length(eq_residuals)
+        _valid_node_count(eq_residuals[idx], options.max_nodes) && continue
+        push!(halted_eqs, popat!(eq_residuals, idx))
+    end
     #= TODO: impliment the following simplification steps:
-    1) expand derivatives
     2) distribute multiplication and expand
     3) group by differential generators (including transcendental generators like exp(du/dx)) and simplify the resulting coefficients
     4) divide out allowed common factors using simple factorization & polynomial factorization (expanding after the cancellation)
@@ -135,14 +173,14 @@ function _simplify_branch(sys::DiffEqBranch, max_passes::Int=4)
     8) normalize equation sign so leading coefficient has positive sign and the differential generators are ordered from left to right by their order
     9) handle degenerate forms such as 0 ~ 0 or c ~ 0
 =#
-    for _ in 1:max_passes
+    for _ in 1:options.max_passes
         pass_start = current
 
 
 
         isequal(current.eqs, pass_start.eqs) &&
             isequal(current.bcs, pass_start.bcs) &&
-        isequal(current.restrictions, pass_start.restrictions) &&
+            isequal(current.restrictions, pass_start.restrictions) &&
             break
     end
 
@@ -152,7 +190,7 @@ function _simplify_branch(sys::DiffEqBranch, max_passes::Int=4)
             bcs=current.bcs, domain=current.domain, name=current.name,
             domain_set=current.domain_set, restrictions=current.restrictions,
             history=append_derivation(sys.history,
-                SimplificationStep(max_passes)),
+                SimplificationStep(options)),
         )
     end
     current
@@ -169,9 +207,9 @@ The input is not mutated. A changed branch receives one aggregate
 separate derivation steps.
 """
 function simplify_system(sys::DiffEqSystem;
-    max_passes::Int=4)
+    options::SimplificationOptions=SimplificationOptions())
     DiffEqSystem([
-        _simplify_branch(branch, max_passes)
+        _simplify_branch(branch, options)
         for branch in sys.branches
     ])
 end

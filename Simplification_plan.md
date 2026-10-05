@@ -41,54 +41,10 @@ It accepts one system and returns one new `DiffEqSystem`. A system may contain
 multiple `DiffEqBranch` values because branches represent a union of solution
 sets, but the simplifier does not create a second independent system context.
 
-## How to use this document as a VS Code task list
-
-The checkboxes in the task blocks below are implementation tasks. The
-surrounding sections are the design reference for completing them; ordinary
-bullets elsewhere in the document are explanatory lists, not tasks.
-
-Recommended extension: **Todo+**
-
-Install it from the VS Code Extensions view by searching for `Todo+`, or run:
-
-```text
-ext install fabiospampinato.vscode-todo-plus
-```
-
-Todo+ provides `Todo: Toggle Done` and `Todo: Archive`. It supports Markdown
-checkbox symbols, and its archive command moves completed tasks into an
-`Archive` section. Configure it to recognize this file as the Todo+ file and
-to preserve Markdown checkbox syntax:
-
-```json
-{
-    "todo.file.include": ["**/Simplification_plan.md"],
-    "todo.symbols.box": "[ ]",
-    "todo.symbols.done": "[x]",
-    "todo.symbols.cancelled": "[-]",
-    "todo.archive.name": "Archive"
-}
-```
-
-`todo.file.name` is intended for Todo+'s own supported todo-file names; use
-`todo.file.include` for this Markdown file. These settings can be placed in
-VS Code's User Settings if they should apply everywhere, or in the repository's
-`.vscode/settings.json` if the project should carry the setup for every
-contributor. The latter is optional and should only be committed if the
-repository wants to standardize on Todo+.
-
-Check a task with Todo+'s `Todo: Toggle Done` command (or the configured
-shortcut), then run `Todo: Archive` to move all completed task lines into the
-`Archive` section. There is no need for a repository script: Todo+ already
-provides the requested move operation. `Markdown All in One` remains useful
-for Markdown editing, but it does not provide this archive workflow.
-
 ### Task block: architecture and state
 
-- [ ] Add immutable `SimplificationRoot` snapshots to `DiffEqSystem`.
+- [x] Add immutable `SimplificationRoot` snapshots to `DiffEqSystem`.
 - [ ] Preserve the root when constructing transformed systems.
-- [ ] Add `original_domain` and `domain_restrictions` to branch state without storing a second effective-domain copy.
-- [ ] Implement `_effective_domain(branch)` and invalidate the existing interval cache when restrictions change.
 - [ ] Record the source of added domain restrictions in transformation history or diagnostics.
 
 ### Task block: local simplification
@@ -208,8 +164,8 @@ end
 ```
 
 The root is created when the system is constructed and copied unchanged into
-results. `DerivationHistory` still records *how* a branch changed, while
-`root` records *what the complete input system was*. No DAG, parent links, or
+results. `DerivationHistory` still records _how_ a branch changed, while
+`root` records _what the complete input system was_. No DAG, parent links, or
 copied intermediate systems are required.
 
 ### 1.4 `SimplificationOptions` configures one complete run
@@ -441,15 +397,15 @@ The useful question for the local collector is:
 Use the following mutually exclusive primary classes relative to a selected
 generator set:
 
-| Class            | Meaning                                                                                        | Example                                         | Local treatment                                                      |
-| ---------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- |
-| `free`           | Contains none of the selected generators                                                       | `a(x, u)` when only `u'` and `u''` are selected | Treat as a coefficient for those generators                          |
-| `affine`         | Polynomial degree at most one in the selected generator(s)                                     | `a(x)u'' + b(x)`                                | Collect with polynomial coefficient extraction                       |
-| `polynomial`     | Polynomial degree two or greater in a selected generator                                       | `(u'')^2 + u'u''`                               | Collect powers and monomials; do not call it linear                  |
-| `rational`       | Contains selected generators in a quotient or negative power                                   | `u''/(1+u')`                                    | Preserve rational structure or use a rational-function routine       |
-| `algebraic`      | Uses roots or other algebraic operations not represented as a polynomial                       | `sqrt(u')u''`                                   | Preserve as an algebraic atom unless an algebraic routine is enabled |
-| `transcendental` | Uses selected generators inside `exp`, `log`, `sin`, `abs`, or another non-polynomial function | `exp(u')`, `sin(u'')`                           | Preserve the function application as a nonlinear differential atom   |
-| `opaque`         | The traversal cannot safely classify the operation                                             | a custom symbolic function of `u'`              | Preserve it unchanged and report the unsupported structure           |
+| Class            | Meaning                                                                                       | Example                                         | Local treatment                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- |
+| `free`           | Contains none of the selected generators                                                      | `a(x, u)` when only `u'` and `u''` are selected | Treat as a coefficient for those generators                          |
+| `affine`         | Polynomial degree at most one in the selected generator(s)                                    | `a(x)u'' + b(x)`                                | Collect with polynomial coefficient extraction                       |
+| `polynomial`     | Polynomial degree two or greater in a selected generator                                      | `(u'')^2 + u'u''`                               | Collect powers and monomials; do not call it linear                  |
+| `rational`       | Contains selected generators in a quotient or negative power                                  | `u''/(1+u')`                                    | Preserve rational structure or use a rational-function routine       |
+| `algebraic`      | Uses roots or other algebraic operations not represented as a polynomial                      | `sqrt(u')u''`                                   | Preserve as an algebraic atom unless an algebraic routine is enabled |
+| `transcendental` | Uses selected generators inside`exp`, `log`, `sin`, `abs`, or another non-polynomial function | `exp(u')`, `sin(u'')`                           | Preserve the function application as a nonlinear differential atom   |
+| `opaque`         | The traversal cannot safely classify the operation                                            | a custom symbolic function of`u'`               | Preserve it unchanged and report the unsupported structure           |
 
 `affine` is the precise meaning of “linear” here: it includes a constant
 remainder and coefficients that may depend on non-selected expressions. A
@@ -534,16 +490,16 @@ The design intentionally keeps the data model small. Persistent state belongs
 in `DiffEqSystem`, `DiffEqBranch`, and `DerivationHistory`; the following
 additional types have distinct roles:
 
-| Type | Role | Why it is not another existing field |
-| --- | --- | --- |
-| `SimplificationRoot` | Immutable snapshot of the complete input | Provenance of the whole system is different from branch history |
-| `ProofFact` | Result and evidence of one semantic proof | A boolean cannot distinguish proven, disproven, and unknown |
-| `AssumptionState` | Run-local cache of facts for one branch | It is temporary computation state, not persistent branch metadata |
-| `DifferentialTerm` | Classification of expression dependence on selected generators | It guides local collection and is not an equation or branch field |
-| `AtomTable` | Reversible map for one polynomial backend call | It is temporary translation state, not a symbolic variable declaration |
-| `FactorCandidate` | Factor multiplicity and proof attached to cancellation | Factor discovery data is not the same as a branch restriction |
-| `EquationRelation` | Proposed cross-equation operation and certificate | It describes a reduction candidate, not a transformed equation |
-| `SystemReductionStep` | History record for accepted system reduction | It records a system operation distinct from local simplification |
+| Type                  | Role                                                           | Why it is not another existing field                                   |
+| --------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `SimplificationRoot`  | Immutable snapshot of the complete input                       | Provenance of the whole system is different from branch history        |
+| `ProofFact`           | Result and evidence of one semantic proof                      | A boolean cannot distinguish proven, disproven, and unknown            |
+| `AssumptionState`     | Run-local cache of facts for one branch                        | It is temporary computation state, not persistent branch metadata      |
+| `DifferentialTerm`    | Classification of expression dependence on selected generators | It guides local collection and is not an equation or branch field      |
+| `AtomTable`           | Reversible map for one polynomial backend call                 | It is temporary translation state, not a symbolic variable declaration |
+| `FactorCandidate`     | Factor multiplicity and proof attached to cancellation         | Factor discovery data is not the same as a branch restriction          |
+| `EquationRelation`    | Proposed cross-equation operation and certificate              | It describes a reduction candidate, not a transformed equation         |
+| `SystemReductionStep` | History record for accepted system reduction                   | It records a system operation distinct from local simplification       |
 
 Do not add separate persistent structs for generic rewrite candidates,
 diagnostics, solution pieces, guards, domain pieces, or complexity contexts.
@@ -1316,19 +1272,19 @@ history or diagnostics if that explanation is needed.
 1. Keep `simplify_system` as the public orchestration entry point and refactor
    its current helpers into explicit local stages.
 2. Add immutable `SimplificationRoot` snapshots to `DiffEqSystem` construction
-    and copying before transformations are implemented.
+   and copying before transformations are implemented.
 3. Implement residual canonicalization and identity/contradiction
-    classification while preserving `DiffEqBranch` metadata.
+   classification while preserving `DiffEqBranch` metadata.
 4. Refactor `group_coefficients` into a safe collector with differential-term
-    classification and nonlinear atom preservation.
+   classification and nonlinear atom preservation.
 5. Expand `SimplificationOptions` with shared budgets and layer switches;
-    record the same options in `SimplificationStep`.
+   record the same options in `SimplificationStep`.
 6. Implement valid-domain restriction through
-    `DiffEqBranch.domain_restrictions` without independent-variable branch
-    creation.
+   `DiffEqBranch.domain_restrictions` without independent-variable branch
+   creation.
 7. Add stable canonical fingerprints and ensure fixed-point checks use them.
 8. Turn divisibility results into proof facts and implement certified
-    cancellation with branch restrictions.
+   cancellation with branch restrictions.
 9. Wire assumption-aware `SYMBOLIC_RULE_GROUPS` into the branch pass.
 10. Implement duplicate/scalar-multiple system relations using canonical
     residuals.

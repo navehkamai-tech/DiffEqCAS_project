@@ -27,7 +27,7 @@ struct SymbolicDomain
             end
             push!(normalized, key => collect(constraints))
         end
-        sort!(normalized, by = pair -> string(pair.first isa Tuple ? pair.first[begin] : pair.first))
+        sort!(normalized, by=pair -> string(pair.first isa Tuple ? pair.first[begin] : pair.first))
         new(normalized, variables)
     end
 end
@@ -121,6 +121,11 @@ struct FactorStep <: DerivationStep
     branch_index::Union{Nothing,Int}
 end
 
+struct DomainRestrictStep <: DerivationStep
+    variables::Vector{Symbolics.Num}
+    constraint::Symbolics.Num
+end
+
 mutable struct DiffEqBranch{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symbolics.Num},P<:AbstractVector{<:Symbolics.Num},E<:AbstractVector{<:Symbolics.Equation},B<:AbstractVector{<:Symbolics.Equation}}
     name::String
     ivs::I
@@ -167,6 +172,38 @@ function DiffEqBranch(; eqs, ivs, dvs, ps=Symbolics.Num[], bcs=Symbolics.Equatio
         history=history)
 end
 
+struct RootBranch
+    ivs::Tuple
+    dvs::Tuple
+    ps::Tuple
+    eqs::Tuple
+    bcs::Tuple
+    domain::SymbolicDomain
+end
+
+function RootBranch(DiffEqBranch)
+    ivs = Tuple(DiffEqBranch.ivs...)
+    dvs = Tuple(DiffEqBranch.dvs...)
+    ps = Tuple(DiffEqBranch.ps...)
+    eqs = Tuple(DiffEqBranch.eqs...)
+    bcs = Tuple(DiffEqBranch.bcs...)
+    RootBranch(ivs, dvs, ps, eqs, bcs, domain)
+end
+
+struct SystemRoot
+    branches::Tuple #tuple of RootBranches
+end
+
+function SystemRoot(branches::Vector{<:DiffEqBranch}=DiffEqBranch[])
+    root_branches = RootBranch[]
+    for branch in branches
+        push!(root_branches, RootBranch(branch))
+    end
+    SystemRoot(Tuple(root_branches...))
+end
+
+SystemRoot(branch::DiffEqBranch) = SystemRoot([branch])
+
 """
 Collection of branches representing a union of solution sets.
 
@@ -178,11 +215,22 @@ mutable struct DiffEqSystem
     branches::Vector{DiffEqBranch}
     pending::Stack{DiffEqBranch} #I think I want to move the pending field
     completed::Vector{DiffEqBranch}
+    root::SystemRoot
 end
 
-function DiffEqSystem(branches::Vector{<:DiffEqBranch}=DiffEqBranch[])
+SystemRoot(sys::DiffEqSystem) = SystemRoot(sys.branches)
+
+function record_root!(branches::Vector{<:DiffEqBranch})
+    root === nothing && DiffEqSystem.root = SystemRoot(branches)
+end
+
+function DiffEqSystem(branches::Vector{<:DiffEqBranch}=DiffEqBranch[], record_root=true)
     normalized = DiffEqBranch[branches...]
-    DiffEqSystem(normalized, Stack{DiffEqBranch}(), DiffEqBranch[])
+    if record_root
+        DiffEqSystem(normalized, Stack{DiffEqBranch}(), DiffEqBranch[], SystemRoot(branches))
+    end
+    println("danger: root is not recorded")
+    DiffEqSystem(normalized, Stack{DiffEqBranch}(), DiffEqBranch[], root=nothing)
 end
 
 function DiffEqSystem(eqs, bcs, domain, ivs, dvs; kwargs...)

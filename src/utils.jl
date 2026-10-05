@@ -111,6 +111,20 @@ function get_base_op(expr)
     return expr
 end
 
+function _count_nodes(node)
+    count = 1
+
+    if hasmethod(TermInterface.isexpr, Tuple{typeof(node)}) && TermInterface.isexpr(node)
+        count += sum(_count_nodes(c) for c in TermInterface.children(node); init=0)
+    elseif SymbolicUtils.istree(node)
+        count += sum(_count_nodes(c) for c in SymbolicUtils.arguments(node); init=0)
+    end
+
+    return count
+end
+
+robust_node_count(expr) = _count_nodes(Symbolics.unwrap(expr))
+
 #rules for stuff simplify doesn't handle well
 #symbolic rule util functions
 notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number

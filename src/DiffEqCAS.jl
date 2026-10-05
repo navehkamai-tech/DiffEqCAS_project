@@ -7,7 +7,7 @@ the goal is for it to be quite general and be able to handle all systems of any 
 in addition my aim is to have leave the possibility of numeric computation open for the future, so design choices must be made with that in mind
 =#
 
-using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unitful, IntervalArithmetic, IntervalBoxes, StaticArrays, LRUCache, DataStructures, Memoize
+using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unitful, IntervalArithmetic, IntervalBoxes, StaticArrays, LRUCache, DataStructures, Memoize, TermInterface
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute
 import SymbolicUtils: maketerm, @rule, @acrule
 

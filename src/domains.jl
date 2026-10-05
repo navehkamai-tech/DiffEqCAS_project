@@ -126,11 +126,11 @@ end
 # Add constraints to an already-canonical domain. If `ivs` is provided, it
 # controls both the order inside tuple keys and the order of the output groups.
 function add_constraints(
-    domain_pairs,
+    domain::SymbolicDomain,
     new_constraints::AbstractVector,
     ivs=nothing,
 )
-    domain_pairs = _domain_pairs(domain_pairs)
+    domain_pairs = _domain_pairs(domain)
     variable_order = ivs === nothing ? _domain_variables(domain_pairs) : collect(ivs)
     ivs !== nothing && _validate_iv_order!(variable_order, domain_pairs)
     groups = [(Set(_key_variables(key)), collect(Any, constraints))
@@ -146,16 +146,24 @@ function add_constraints(
     end
 
     final_pairs = Pair[]
+    final_variables = Symbolics.Num[]
     for (variable_set, constraints) in groups
         ordered_variables = _ordered_group_variables(variable_set, variable_order)
         new_key = length(ordered_variables) == 1 ? only(ordered_variables) : Tuple(ordered_variables)
         push!(final_pairs, new_key => constraints)
+        append!(final_variables, ordered_variables)
     end
-    return final_pairs
+    return SymbolicDomain(final_pairs, final_variables)
 end
 
 add_constraints(domain_pairs::AbstractVector{<:Pair}, new_constraints::Pair, ivs=nothing) =
     add_constraints(domain_pairs, [new_constraints], ivs)
+
+function restrict_domain(sys::DiffEqBranch, constraint::Symbolics.Num)
+    sys.domain=add_constraints(sys.domain, constraint)
+    vars = Symbolics.get_variables(constraint)
+    push!(sys.history.steps, DomainRestrictStep(vars, constraint))
+end
 
 const ROI = Ref{Float64}(1000.0)
 const tolerance = Ref{Float64}(0.01)
