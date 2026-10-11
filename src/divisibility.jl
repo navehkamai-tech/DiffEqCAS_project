@@ -1,70 +1,217 @@
 
-# Strict sign bounds are cached separately from symbolic metadata so they can
-# be reused by both relation solving and factor divisibility.
-function _bound_sign_uncached(expr)
-    literal = SymbolicUtils.unwrap_const(Symbolics.unwrap(expr))
-    literal isa Real && return (
-        sign=literal > 0 ? positive : literal < 0 ? negative : undetermined,
-        iszero=isequal(literal, 0),
-    )
-    known_sign = get_sign(expr)
-    known_sign !== undetermined && return (sign=known_sign, iszero=false)
-    simplified = simplify(expr)
-    literal = SymbolicUtils.unwrap_const(Symbolics.unwrap(simplified))
-    literal isa Real && return (
-        sign=literal > 0 ? positive : literal < 0 ? negative : undetermined,
-        iszero=isequal(literal, 0),
-    )
+const cache_size = Ref{Int64}(1024)
 
-    # Keep this deliberately conservative: proving every term has the same
-    # sign is useful for parameter-dependent bounds without guessing unknowns.
-    if SymbolicUtils.istree(simplified)
-        op = SymbolicUtils.operation(simplified)
-        args = SymbolicUtils.arguments(simplified)
-        if op === (+)
-            signs = _bound_sign.(args)
-            if all(value -> value.sign === positive, signs)
-                return (sign=positive, iszero=false)
-            elseif all(value -> value.sign === negative, signs)
-                return (sign=negative, iszero=false)
-            elseif all(value -> value.iszero, signs)
-                return (sign=undetermined, iszero=true)
+global cache = LRU{Any,Any}(maxsize=cache_size[])
+
+@enum SignState positive negative iszero either undetermined
+
+@enum DivisState divisible haszero undetermined
+
+"""
+    ConstraintEvidence
+
+Internal result for the factor zero-set pipeline.  The public decision is
+`bound`; `divisibility` and `sign` make numerical decisions inspectable and give
+later stages a place to return their proof object.
+"""
+struct ConstraintEvidence
+    bound::IntervalArithmetic.Interval
+    divisibility::DivisState
+    sign::SignState
+end
+
+function factor_evidence(factor, sys::DiffEqBranch)
+    components = _evidence_components(sys, factor)
+    key = (:constraint_evidence, Symbolics.unwrap(factor), components)
+
+    haskey(cache, key) && return cache[key]
+
+    result = _factor_evidence_uncached(factor, sys, components)
+    cache[key] = result
+
+    return result
+end
+
+factor_sign(factor, sys::DiffEqBranch) = factor_evidence(factor, sys).sign
+
+factor_sign(factor, sys::DiffEqSystem) =
+    length(sys.branches) == 1 ?
+    factor_sign(factor, only(sys.branches)) :
+    throw(ArgumentError("factor sign requires one selected branch"))
+
+factor_divisibility(factor, sys::DiffEqBranch) = factor_evidence(factor, sys).divisibility
+
+factor_divisibility(factor, sys::DiffEqSystem) =
+    length(sys.branches) == 1 ?
+    factor_divisibility(factor, only(sys.branches)) :
+    throw(ArgumentError("factor divisibility requires one selected branch"))
+
+
+function _factor_evidence_uncached(factor, sys::DiffEqBranch, components)
+    if _contains_equal(sys.ps, factor)
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, undetermined)
+    end
+
+    # Stage 1: Prime the global cache with exact bounds for independent variables
+    _prime_domain_bounds!(components)
+
+    # Stage 2: Fast structural and interval arithmetic
+    best_evidence = _infer_tree(factor, components)
+
+    if best_evidence.divisibility !== undetermined || isempty(components)
+        return best_evidence
+    end
+
+    for stage in (
+        _affine_factor_evidence,
+        _centered_factor_evidence,
+        _sturm_factor_evidence,
+        _paved_factor_evidence,
+    )
+        result = stage(factor, components, sys)
+
+        if result !== nothing
+            new_bound = best_evidence.bound ∩ result.bound
+            new_sign = result.sign !== undetermined ? result.sign : best_evidence.sign
+            new_divis = result.divisibility !== undetermined ? result.divisibility : best_evidence.divisibility
+
+            if new_divis === undetermined && (new_sign in (positive, negative) || 0 ∉ new_bound)
+                new_divis = divisible
             end
-        elseif op === (-) && length(args) == 1
-            value = _bound_sign(args[1])
-            return (sign=value.sign === positive ? negative :
-                         value.sign === negative ? positive : undetermined,
-                iszero=value.iszero)
-        elseif op === (*)
-            signs = _bound_sign.(args)
-            any(value -> value.iszero, signs) &&
-                return (sign=undetermined, iszero=true)
-            nonzero = all(value -> value.sign in (positive, negative), signs)
-            if nonzero
-                negative_factors = count(value -> value.sign === negative, signs)
-                return (sign=isodd(negative_factors) ? negative : positive,
-                    iszero=false)
-            end
-        elseif op === (/) && length(args) == 2
-            numerator, denominator = _bound_sign.(args)
-            if denominator.sign in (positive, negative) && numerator.sign in (positive, negative)
-                sign = numerator.sign === denominator.sign ? positive : negative
-                return (sign=sign, iszero=false)
-            elseif numerator.iszero && denominator.sign in (positive, negative)
-                return (sign=undetermined, iszero=true)
-            end
+
+            best_evidence = ConstraintEvidence(new_bound, new_divis, new_sign)
+            best_evidence.divisibility !== undetermined && return best_evidence
         end
     end
 
-    return (sign=get_sign(simplified), iszero=false)
+    return best_evidence
 end
 
-function _bound_sign(expr)
-    key = (:bound_sign, Symbolics.unwrap(expr))
-    haskey(cache, key) && return cache[key]
-    result = _bound_sign_uncached(expr)
-    cache[key] = result
+# beginning of the pipeline - always called first
+
+"""
+Natural interval evaluation over each domain component.
+
+obtain the component boxes without invoking paving,
+evaluate `factor` with `_domain_interval_value` (extended for all supported
+registered functions), and return:
+* `divisible` only when every feasible box excludes zero;
+* `haszero` only with a certified feasible zero;
+* leave `undetermined` when interval dependency leaves the result unresolved.
+"""
+function _prime_domain_bounds!(components)
+    for component in components
+        key, constraints = component
+        ivs = collect(_key_variables(key))
+        bounds = Dict(iv => IntervalArithmetic.Interval(-Inf, Inf) for iv in ivs)
+
+        for constraint in constraints
+            relation = Symbolics.unwrap(constraint)
+            op = Symbolics.operation(relation)
+            op in ((<), (≤), (>), (≥), (==)) || continue
+
+            lhs, rhs = SymbolicUtils.arguments(relation)
+            expr = lhs - rhs
+            expr_vars = Symbolics.get_variables(expr)
+            constraint_ivs = [iv for iv in ivs if _contains_equal(expr_vars, iv)]
+
+            length(constraint_ivs) == 1 || continue
+            iv = only(constraint_ivs)
+
+            is_feasible = _update_affine_bound!(bounds, expr, iv, op)
+            is_feasible || throw(DomainError(iv, "Infeasible domain constraint detected."))
+        end
+
+        # Inject the bounds into the global cache to prime _infer_tree
+        for (iv, bound) in bounds
+            cache_key = (:constraint_evidence, Symbolics.unwrap(iv), components)
+            sign_state = bound.hi < 0 ? negative : (bound.lo > 0 ? positive : (bound.lo == 0 && bound.hi == 0 ? iszero : undetermined))
+            divis_state = (sign_state in (positive, negative) || 0 ∉ bound) ? divisible : (sign_state === iszero ? haszero : undetermined)
+            cache[cache_key] = ConstraintEvidence(bound, divis_state, sign_state)
+        end
+    end
+end
+
+function _infer_tree(expr, components)
+    expr = simplify(expr)
+    expr==0 && return ConstraintEvidence(interval(0, 0), haszero, iszero)
+
+    # 1. Check existing cache
+    key = (:constraint_evidence, Symbolics.unwrap(expr), components)
+    if haskey(cache, key) && cache[key].sign !== undetermined
+        return cache[key]
+    end
+
+    # 2. Check exact literals
+    literal = SymbolicUtils.unwrap_const(Symbolics.unwrap(expr))
+    if literal isa Real
+        return _evidence_from_literal(literal)
+    end
+
+    # 3. Recursive subexpression inference
+    simplified = simplify(expr)
+    SymbolicUtils.istree(simplified) || return ConstraintEvidence(interval(-Inf, Inf), undetermined, undetermined) #[cite: 1]
+
+    op = SymbolicUtils.operation(simplified)
+    args = SymbolicUtils.arguments(simplified)
+
+    # Recurse down. If a leaf is undetermined and not cached, this will bubble up.
+    children = [_infer_tree(arg, components) for arg in args]
+    result = _combine_child_signs(op, children)
+
+    # Only cache if we actually deduced something useful to save memory
+    if result.sign !== undetermined || result.divisibility !== undetermined
+        cache[key] = result
+    end
+
     return result
+end
+
+function _combine_child_evidence(op, children)
+    # 1. Compute continuous numeric bounds using IntervalArithmetic
+    bounds = [child.bound for child in children]
+
+    # Safely apply the operation to the intervals if supported, else default to unbounded
+    new_bound = if op in (+, -, *, /)
+        op(bounds...)
+    else
+        IntervalArithmetic.Interval(-Inf, Inf)
+    end
+
+    # 2. Structural deduction (retaining your existing logic as a fallback)
+    struct_sign = _structural_sign(op, children)
+
+    # 3. Reconcile numeric bounds with structural deduction
+    final_sign = _reconcile_sign(new_bound, struct_sign)
+    final_divis = _reconcile_divisibility(new_bound, final_sign)
+
+    return ConstraintEvidence(new_bound, final_divis, final_sign)
+end
+
+# affine checks
+function _update_affine_bound!(bounds, expr, iv, op)
+    affine = _affine_coefficients(expr, iv)
+    affine === nothing && return true # true indicates the domain remains feasible
+
+    coeff = SymbolicUtils.unwrap_const(affine[1])
+    intercept = SymbolicUtils.unwrap_const(affine[2])
+    (coeff isa Real && intercept isa Real) || return true
+
+    val = -intercept / coeff
+    effective_op = coeff > 0 ? op : _reverse_relation(op)
+
+    new_bound = if effective_op in ((<), (≤))
+        Interval(-Inf, val)
+    elseif effective_op in ((>), (≥))
+        Interval(val, Inf)
+    else
+        Interval(val, val) # effective_op === (==)
+    end
+
+    bounds[iv] = bounds[iv] ∩ new_bound
+
+    # Return false if the updated interval is empty, signaling an infeasible domain
+    return !isempty(bounds[iv])
 end
 
 function _affine_coefficients(expr, iv)
@@ -105,270 +252,49 @@ function _affine_coefficients(expr, iv)
     return nothing
 end
 
-function _reverse_relation(op)
-    op === (<) && return (>)
-    op === (≤) && return (≥)
-    op === (>) && return (<)
-    op === (≥) && return (≤)
-end
-
-function _sign_from_bound(op, bound_sign, bound_iszero)
-    lower_bound = op in ((>), (≥))
-    upper_bound = op in ((<), (≤))
-    lower_bound || upper_bound || return undetermined
-    strict_bound = op === (>) || op === (<)
-    bound_excludes_zero = strict_bound && bound_iszero
-    if lower_bound
-        return bound_sign === positive || bound_excludes_zero ? positive : either
-    end
-    return bound_sign === negative || bound_excludes_zero ? negative : either
-end
-
-function _relation_operands(constraint, iv)
-    # Canonicalize simple affine relations locally instead of rewriting the
-    # domain, so callers retain the constraints they supplied.
-    relation = Symbolics.unwrap(constraint)
-    op = Symbolics.operation(relation)
-    op in ((<), (≤), (>), (≥)) || return nothing
-    lhs, rhs = SymbolicUtils.arguments(relation)
-    isequal(rhs, iv) || return (lhs, rhs, op)
-    return (rhs, lhs, _reverse_relation(op))
-end
-
-function _relation_sign(constraint, iv)
-    operands = _relation_operands(constraint, iv)
-    if operands !== nothing
-        lhs, rhs, op = operands
-        if isequal(lhs, iv) && !_contains_equal(Symbolics.get_variables(rhs), iv)
-            bound = _bound_sign(rhs)
-            return _sign_from_bound(op, bound.sign, bound.iszero)
-        end
-    end
-
-    relation = Symbolics.unwrap(constraint)
-    op = Symbolics.operation(relation)
-    op in ((<), (≤), (>), (≥)) || return undetermined
-    lhs, rhs = SymbolicUtils.arguments(relation)
-    affine = _affine_coefficients(lhs - rhs, iv)
-    affine === nothing && return undetermined
-    coefficient, intercept = affine
-    isequal(coefficient, 0) && return undetermined
-    coefficient_sign = _bound_sign(coefficient).sign
-    coefficient_sign in (positive, negative) || return undetermined
-
-    bound = _bound_sign(-intercept / coefficient)
-    relation_op = coefficient_sign === positive ? op : _reverse_relation(op)
-    return _sign_from_bound(relation_op, bound.sign, bound.iszero)
-end
-
-function _combined_constraint_sign(found_positive, found_negative)
-    found_positive == found_negative && return either
-    return found_positive ? positive : negative
-end
-
-function _zero_excluded_by_relation(constraint, iv)
-    u_constraint = Symbolics.unwrap(constraint)
-    variables = Symbolics.get_variables(u_constraint)
-    _contains_equal(variables, iv) || return false
-    op = Symbolics.operation(u_constraint)
-    op in ((<), (≤), (>), (≥), (==), (!=)) || return false
-    zero_constraint = simplify(substitute(u_constraint, iv => 0))
-    isequal(SymbolicUtils.unwrap_const(Symbolics.unwrap(zero_constraint)), false) &&
-        return true
-
-    # A positive power of the independent variable is zero at the origin.
-    # Handle symbolic positive exponents when substitution cannot evaluate
-    # `0^n` directly, while leaving unknown or nonpositive exponents alone.
-    op in ((<), (≤), (>), (≥)) || return false
-    lhs, rhs = SymbolicUtils.arguments(u_constraint)
-    power = nothing
-    other = nothing
-    for (candidate, remainder) in ((lhs, rhs), (rhs, lhs))
-        if SymbolicUtils.istree(candidate) &&
-            SymbolicUtils.operation(candidate) === (^)
-            base, exponent = SymbolicUtils.arguments(candidate)
-            if isequal(base, iv)
-                power = (candidate, exponent)
-                other = remainder
-                break
-            end
-        end
-    end
-    power === nothing && return false
-    isequal(SymbolicUtils.unwrap_const(Symbolics.unwrap(other)), 0) || return false
-    _, exponent = power
-    exponent_sign = _bound_sign(exponent).sign
-    exponent_sign === positive || return false
-    op in ((<), (>)) || return false
-    return true
-end
-
-function _infer_variable_sign(constraints, iv)
-    found_positive = false
-    found_negative = false
-    for constraint in constraints
-        sign = _relation_sign(constraint, iv)
-        found_positive |= sign === positive
-        found_negative |= sign === negative
-    end
-    no_sign_evidence = !found_positive && !found_negative
-    no_sign_evidence && return nothing
-    return _combined_constraint_sign(found_positive, found_negative)
-end
-
-function _constraints_exclude_zero(constraints, iv)
-    return any(constraints) do constraint
-        _relation_sign(constraint, iv) in (positive, negative) ||
-            _zero_excluded_by_relation(constraint, iv)
-    end
-end
-
 """
-    DivisibilityEvidence
-
-Internal result for the factor zero-set pipeline.  The public decision is
-`status`; `stage` and `detail` make numerical decisions inspectable and give
-later stages a place to return their proof object.
-"""
-struct DivisibilityEvidence
-    status::DivisState
-    stage::Symbol
-    detail::Any
-end
-
-_proven(status::DivisState, stage, detail=nothing) =
-    DivisibilityEvidence(status, stage, detail)
-
-# Domain components are kept separate because a factor may be nonzero on one
-# connected component and zero on another.
-function _divisibility_components(sys::DiffEqBranch, factor)
-    factor_variables = Set(Symbolics.get_variables(Symbolics.unwrap(factor)))
-    return [
-        (key, constraints) for (key, constraints) in sys.domain
-                               if !isempty(intersect(factor_variables, Set(_key_variables(key))))
-    ]
-end
-
-function _divisibility_cache_key(factor, components)
-    # TODO: Replace this structural tuple with the canonical expression/domain
-    # key used by the global cache once cache invalidation is finalized.
-    (:divisibility, Symbolics.unwrap(factor), components)
-end
-
-"""
-Cheap exact facts that apply to any already-factored expression.
-
-This is intentionally not another factorization pass.  The caller has
-factored the differential equation already; this stage only recognizes facts
-such as literal zero/nonzero and exact simplification.
-"""
-function _exact_factor_divisibility(factor, sys::DiffEqBranch)
-    value = SymbolicUtils.unwrap_const(Symbolics.unwrap(factor))
-    value isa Number &&
-        return _proven(value == 0 ? haszero : divisible, :exact, value)
-
-    simplified = simplify(factor)
-    simplified_value = SymbolicUtils.unwrap_const(Symbolics.unwrap(simplified))
-    simplified_value isa Number &&
-        return _proven(simplified_value == 0 ? haszero : divisible,
-            :exact_simplification, simplified_value)
-
-    return nothing
-end
-
-function _variable_factor_divisibility(factor, components)
-    # This is the retained fast specialization for a leaf independent
-    # variable. Its sign and relation helpers are no longer a separate
-    # divisibility pipeline; they are one stage of factor_divisibility.
-    for (key, constraints) in components
-        _contains_equal(_key_variables(key), factor) || continue
-        inferred_sign = _infer_variable_sign(constraints, factor)
-        inferred_sign === nothing ||
-            setmetadata(Symbolics.unwrap(factor), VarSign, inferred_sign)
-        _constraints_exclude_zero(constraints, factor) &&
-            return _proven(divisible, :variable_constraints)
-
-        component = [key => constraints]
-        if constraints_satisfiable([factor ≤ 0, factor ≥ 0], component, true)
-            return _proven(haszero, :variable_zero_feasibility)
-        end
-        # TODO: This is the old behavior and is only sound when the
-        # satisfiability result is certified. Once constraints_satisfiable
-        # exposes an unresolved state, return `undetermined` for that state.
-        return _proven(divisible, :variable_domain_exclusion)
-    end
-    return _proven(divisible, :independent_variable)
-end
-
-"""
-Cheap domain reasoning for a general factor.
-
-The old affine/sign helpers are deliberately retained behind the variable
-specialization below. They should be generalized in two directions:
-
-* affine factors: reuse `_affine_coefficients` after normalizing the factor;
-* monotone/factored expressions: combine factor sign facts without factoring
-  the already-factored differential equation again.
-
-The arbitrary-expression case needs zero-set reasoning, not merely a renamed
-variable substitution.
-"""
-function _cheap_factor_divisibility(factor, components, sys::DiffEqBranch)
-    _contains_equal(sys.ps, factor) &&
-        return _proven(divisible, :parameter)
-
-    if _contains_equal(sys.ivs, factor) &&
-        !SymbolicUtils.istree(Symbolics.unwrap(factor))
-        return _variable_factor_divisibility(factor, components)
-    end
-
-    affine = _affine_factor_divisibility(factor, components, sys)
-    affine !== nothing && return affine
-
-    #
-    # TODO: Add a generic symbolic zero-set stage here:
-    # PSEUDOCODE:
-    #   for constraint in component constraints
-    #       classify constraint under factor == 0
-    #       if contradiction is certified, return divisible
-    #       if a feasible zero is certified, return haszero
-    #   end
-    #   return nothing
-    return nothing
-end
-
-"""
-    _affine_factor_divisibility(factor, components, sys)
+    _affine_factor_evidence(factor, components, sys)
 
 Classify a factor that is affine in one independent variable.  The domain
 solver already handles linear inequalities and equalities, so asking it
 whether the affine zero set is feasible gives a conservative, reusable proof
 without factoring the expression again.
 """
-function _affine_factor_divisibility(factor, components, sys::DiffEqBranch)
+function _affine_factor_evidence(factor, components, sys::DiffEqBranch)
     factor_variables = Symbolics.get_variables(Symbolics.unwrap(factor))
-    independent_variables = [
-        iv for iv in sys.ivs if _contains_equal(factor_variables, iv)
-    ]
+    independent_variables = [iv for iv in sys.ivs if _contains_equal(factor_variables, iv)]
     length(independent_variables) == 1 || return nothing
     iv = only(independent_variables)
 
     coefficients = _affine_coefficients(Symbolics.unwrap(factor), Symbolics.unwrap(iv))
     coefficients === nothing && return nothing
-    coefficient, _ = coefficients
-    coefficient_sign = _bound_sign(coefficient).sign
-    coefficient_sign in (positive, negative) || return nothing
 
-    for (key, constraints) in components
+    coeff_evidence = _infer_tree(coefficients[1], components)
+    coeff_evidence.sign in (positive, negative) || return nothing
+
+    for component in components
+        key, _ = component
         _contains_equal(_key_variables(key), iv) || continue
-        component = [key => constraints]
-        zero_feasible = constraints_satisfiable([factor == 0], component, true)
-        zero_feasible && return _proven(haszero, :affine_zero_feasibility, iv)
+
+        can_be_nonpositive = constraints_satisfiable([factor ≤ 0], [component], true)
+        if !can_be_nonpositive
+            return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, positive)
+        end
+
+        can_be_nonnegative = constraints_satisfiable([factor ≥ 0], [component], true)
+        if !can_be_nonnegative
+            return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, negative)
+        end
+
+        can_be_zero = constraints_satisfiable([factor == 0], [component], true)
+        if !can_be_zero
+            return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, either)
+        end
+
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), haszero, undetermined)
     end
-
-    return _proven(divisible, :affine_domain_exclusion, iv)
+    return nothing
 end
-
 # TODO: Extend affine zero-set reasoning to factors involving multiple
 # independent variables. Require all variables to belong to one domain
 # component, verify that `_affine_coefficients` generalizes across every
@@ -376,20 +302,8 @@ end
 # true)`. Return `haszero` for a certified feasible zero, `divisible` for a
 # certified exclusion, and `undetermined` whenever the solver is unresolved.
 
-"""
-Natural interval evaluation over each domain component.
 
-TODO (implementation): obtain the component boxes without invoking paving,
-evaluate `factor` with `_domain_interval_value` (extended for all supported
-registered functions), and return:
-* `divisible` only when every feasible box excludes zero;
-* `haszero` only with a certified feasible zero;
-* `nothing` when interval dependency leaves the result unresolved.
-"""
-function _interval_factor_divisibility(factor, components, sys::DiffEqBranch)
-    return nothing # PSEUDOCODE: replace with interval evaluation.
-end
-
+# rest of _factor_evidence_uncached pipeline components
 """
 Centered/mean-value interval form.
 
@@ -416,58 +330,120 @@ end
 """
 Final general fallback.
 
-TODO (implementation): formulate `domain ∧ factor == 0` and call
-`_pave_constraints`/`f_pave_constraints`.  An unresolved boundary box must
-produce `undetermined`, never `divisible`.
+Formulates `domain ∧ factor relation 0` and evaluates feasibility via branch-and-prune paving. 
+An unresolved boundary box produces `undetermined`, never `divisible`.
 """
-function _paved_factor_divisibility(factor, components, sys::DiffEqBranch)
-    return nothing # PSEUDOCODE: replace with zero-set paving.
-end
+function _paved_factor_evidence(factor, components, sys::DiffEqBranch)
+    can_be_nonpositive = false
+    can_be_nonnegative = false
+    can_be_zero = false
 
-function _factor_divisibility_uncached(factor, sys::DiffEqBranch)
-    exact = _exact_factor_divisibility(factor, sys)
-    exact !== nothing && return exact
-
-    _contains_equal(sys.ps, factor) &&
-        return _proven(divisible, :parameter)
-
-    bound = _bound_sign(factor)
-    bound.sign in (positive, negative) &&
-        return _proven(divisible, :strict_sign, bound)
-
-    components = _divisibility_components(sys, factor)
-    isempty(components) &&
-        return _proven(undetermined, :parameter_or_domain_independent)
-
-    # Each stage returns nothing when it cannot prove a result.  This ordering
-    # keeps cheap heuristics ahead of increasingly expensive numerical work.
-    for stage in (
-        _cheap_factor_divisibility,
-        _interval_factor_divisibility,
-        _centered_factor_divisibility,
-        _sturm_factor_divisibility,
-        _paved_factor_divisibility,
-    )
-        result = stage(factor, components, sys)
-        result !== nothing && return result
+    # Evaluate across the union of all relevant topological components
+    for component in components
+        can_be_nonpositive |= constraints_satisfiable([factor ≤ 0], [component], true)
+        can_be_nonnegative |= constraints_satisfiable([factor ≥ 0], [component], true)
+        can_be_zero |= constraints_satisfiable([factor == 0], [component], true)
     end
 
-    return _proven(undetermined, :unresolved)
+    # If a non-positive value is mathematically impossible across all components
+    if !can_be_nonpositive
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, positive)
+    end
+
+    # If a non-negative value is mathematically impossible across all components
+    if !can_be_nonnegative
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, negative)
+    end
+
+    # If it can take both signs but rigorously never touches zero
+    if !can_be_zero
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, either)
+    end
+
+    # The paving algorithm found a feasible zero or hit its tolerance limit on the boundary
+    return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), haszero, undetermined)
 end
 
-function factor_divisibility(factor, sys::DiffEqBranch)
-    components = _divisibility_components(sys, factor)
-    key = _divisibility_cache_key(factor, components)
-    haskey(cache, key) && return cache[key]
-    result = _factor_divisibility_uncached(factor, sys)
-    cache[key] = result
-    return result
+# evidence helpers
+function _evidence_from_literal(literal::Real)
+    if literal > 0
+        return ConstraintEvidence(interval(literal, literal), divisible, positive)
+    elseif literal < 0
+        return ConstraintEvidence(interval(literal, literal), divisible, negative)
+    else
+        return ConstraintEvidence(interval(literal, literal), haszero, iszero)
+    end
 end
 
-factor_divisibility(factor, sys::DiffEqSystem) =
-    length(sys.branches) == 1 ?
-        factor_divisibility(factor, only(sys.branches)) :
-        throw(ArgumentError("factor divisibility requires one selected branch"))
+function _evidence_components(sys::DiffEqBranch, factor)
+    factor_variables = Set(Symbolics.get_variables(Symbolics.unwrap(factor)))
+    return [
+        key => constraints for (key, constraints) in sys.domain
+                               if !isempty(intersect(factor_variables, Set(_key_variables(key))))
+    ]
+end
+
+function _structural_sign(op, children)
+    if op === (+)
+        all(c -> c.sign === positive, children) && return positive
+        all(c -> c.sign === negative, children) && return negative
+        all(c -> c.sign === iszero, children) && return iszero
+    elseif op === (-) && length(children) == 1
+        c = children[1]
+        return c.sign === positive ? negative : c.sign === negative ? positive : undetermined
+    elseif op === (*)
+        any(c -> c.sign === iszero, children) && return iszero
+        if all(c -> c.sign in (positive, negative), children)
+            negatives = count(c -> c.sign === negative, children)
+            return isodd(negatives) ? negative : positive
+        end
+    elseif op === (/) && length(children) == 2
+        num, den = children
+        num.sign === iszero && den.sign in (positive, negative) && return iszero
+        if den.sign in (positive, negative) && num.sign in (positive, negative)
+            return num.sign === den.sign ? positive : negative
+        end
+    end
+    return undetermined
+end
+
+function _reconcile_sign(bound, struct_sign)
+    # Numeric bounds take precedence if they strictly exclude zero
+    bound.hi < 0 && return negative
+    bound.lo > 0 && return positive
+    bound.lo == 0 && bound.hi == 0 && return iszero
+
+    # Fallback to structural sign if the interval crosses zero (or is NaN/Inf)
+    return struct_sign
+end
+
+function _reconcile_divisibility(bound, final_sign)
+    # Divisible if strictly positive/negative structurally, or if 0 is outside the interval
+    if final_sign in (positive, negative) || 0 ∉ bound
+        return divisible
+    elseif final_sign === iszero || (bound.lo == 0 && bound.hi == 0)
+        return haszero
+    end
+    return undetermined
+end
+
+function _reverse_relation(op)
+    op === (<) && return (>)
+    op === (≤) && return (≥)
+    op === (>) && return (<)
+    op === (≥) && return (≤)
+end
+
+function _combined_constraint_sign(found_positive, found_negative)
+    found_positive == found_negative && return either
+    return found_positive ? positive : negative
+end
+
+function _divisibility_cache_key(factor, components)
+    # TODO: Replace this structural tuple with the canonical expression/domain
+    # key used by the global cache once cache invalidation is finalized.
+    (:divisibility, Symbolics.unwrap(factor), components)
+end
 
 function _has_depvar_or_diff(expr, sys::DiffEqBranch)
     any(variable -> _contains_equal(sys.dvs, variable),
@@ -484,141 +460,5 @@ function _can_divide_by(expr::Symbolics.Num, sys::DiffEqBranch)
     _contains_equal(sys.dvs, expr) && return false
     _has_depvar_or_diff(expr, sys) && return false
 
-    return factor_divisibility(expr, sys).status === divisible
-end
-
-_additive_terms(expr) = collect(terms(unwrap(expr)))
-
-_multiplicative_factors(expr) = collect(Symbolics.factors(unwrap(expr)))
-
-"""
-Return syntactic numerator-factor candidates shared by every addend.
-
-This function deliberately does not decide whether a factor is cancellable.
-It only computes a conservative candidate list; `factor_divisibility` remains
-the authority for domain-aware cancellation.  Denominator factors are not
-returned because removing a common denominator requires multiplying the
-equation by that denominator, which is a separate, assumption-sensitive
-transformation.
-
-TODO: replace the vectors with multiplicity-aware FactorCandidate records.
-The current ordered intersection preserves duplicate factors conservatively by
-removing one matching occurrence at a time.
-"""
-function common_divisors(expr, sys::DiffEqBranch)
-    expr === nothing && throw(ArgumentError("input expression cannot be empty"))
-
-    normalized = unwrap(simplify(expand(expand_derivatives(wrap(expr)))))
-    addends = _additive_terms(normalized)
-    isempty(addends) && return Any[]
-
-    shared = _multiplicative_factors(first(addends))
-    for addend in Iterators.drop(addends, 1)
-        available = _multiplicative_factors(addend)
-        retained = Any[]
-        for candidate in shared
-            index = findfirst(factor -> isequal(factor, candidate), available)
-            index === nothing || (push!(retained, candidate); deleteat!(available, index))
-        end
-
-        common_divisors(expr, sys::DiffEqSystem) =
-            length(sys.branches) == 1 ?
-                common_divisors(expr, only(sys.branches)) :
-                throw(ArgumentError("common divisors require one selected branch"))
-        shared = retained
-        isempty(shared) && break
-    end
-
-    # Numeric constants do not improve an equation and can introduce
-    # avoidable type conversions during division.
-    [
-        wrap(factor) for factor in _ordered_unique(shared)
-        if !(SymbolicUtils.unwrap_const(Symbolics.unwrap(factor)) isa Number)
-    ]
-end
-
-# helpers for group_coefficients
-function _is_target(e, unwrapped_dvs::Set, dv_ops)
-    # If it is a leaf node, check if it matches any dvendent variable directly
-    if !SymbolicUtils.istree(e)
-        return e in unwrapped_dvs
-    end
-
-    op = SymbolicUtils.operation(e)
-
-    # Check if the operation matches any of our base dependent operations
-    if any(isequal(op, d_op) for d_op in dv_ops)
-        return true
-    end
-
-    # Support mixed derivatives by recursively checking arguments
-    if op isa Differential
-        args = SymbolicUtils.arguments(e)
-        return _is_target(args[1], unwrapped_dvs, dv_ops)
-    end
-
-    return false
-end
-
-function _find_targets!(e, unwrapped_dvs::Set, dv_ops, targets::Set)
-    # If we found a target, add it and stop recursing
-    if _is_target(e, unwrapped_dvs, dv_ops)
-        push!(targets, e)
-        return
-    end
-
-    # Otherwise, keep digging through the expression tree
-    if SymbolicUtils.istree(e)
-        for arg in SymbolicUtils.arguments(e)
-            _find_targets!(arg, unwrapped_dvs, dv_ops, targets)
-        end
-    end
-end
-
-function _diff_depth(e)
-    if !SymbolicUtils.istree(e)
-        return 0
-    end
-
-    # Increment depth for each Differential operation
-    if SymbolicUtils.operation(e) isa Differential
-        return 1 + _diff_depth(SymbolicUtils.arguments(e)[1])
-    end
-
-    return 0
-end
-
-function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
-    expr = expand_derivatives(unwrap(eq.lhs - eq.rhs))
-
-    unwrapped_dvs = Set([unwrap(d) for d in dvs])
-    dv_ops = [SymbolicUtils.operation(unwrap(d)) for d in dvs]
-    targets = Set()
-
-    # Pass the required state into the mutator function
-    _find_targets!(expr, unwrapped_dvs, dv_ops, targets)
-
-    # Sort targets safely using the external helper
-    sorted_targets = sort(collect(targets), by=_diff_depth, rev=true)
-
-    grouped_expr = 0
-    remainder = expr
-
-    for target in sorted_targets
-        max_deg = Symbolics.degree(remainder)
-        for p in max_deg:-1:1
-            target_term = p==1 ? target : target^p
-            coeff = simplify(Symbolics.coeff(remainder, target_term))
-
-            if !isequal(coeff, 0)
-                grouped_expr += coeff * wrap(target)
-                remainder = simplify(remainder - coeff * target_term)
-            end
-
-        end
-    end
-
-    grouped_expr += simplify(remainder)
-
-    return grouped_expr ~ 0
+    return factor_divisibility(expr, sys) === divisible
 end

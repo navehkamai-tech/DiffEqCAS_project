@@ -1,19 +1,4 @@
 
-const cache_size = Ref{Int64}(1024)
-
-global cache = LRU{Any,Any}(maxsize=cache_size[])
-
-@enum SignState positive negative either undetermined
-
-function get_sign(var)
-    value = unwrap(var)
-    value isa Real && return value > 0 ? positive : value < 0 ? negative : undetermined
-    Symbolics.getmetadata(value, VarSign, undetermined)
-end
-
-@enum DivisState divisible haszero undetermined
-
-
 #operator used for boundary conditions
 @register_symbolic Restrict(expr, domain)
 SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
@@ -275,6 +260,10 @@ function _domain_relation_status(constraint, variables, box)
            (lower == 0 && upper == 0) ? :outside : :unknown
 end
 
+"""
+custom implimentation of intervalbox branch and prune algorithm similar to IntervalConstraintProgramming.pave
+FUTURE DEVELOPMENT: add constraint propogation logic like in IntervalConstraintProgramming.pave
+"""
 function _pave_constraints(box, constraints, variables, epsilon)
     working = [box]
     inner = typeof(box)[]

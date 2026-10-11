@@ -1105,7 +1105,7 @@ function _simplify_branch(branch, options)
                 current_branch, assumptions, options)
             candidates = _discover_assumption_candidates(
                 normalized.branch, assumptions, options)
-            outcomes = _apply_proven_candidates_or_split(
+            outcomes = _applyConstraintEvidence_candidates_or_split(
                 normalized.branch, candidates, assumptions, options)
 
             for outcome in outcomes

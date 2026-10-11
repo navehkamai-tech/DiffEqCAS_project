@@ -4,6 +4,10 @@ _key_variables(key) = key isa Tuple ? key : (key,)
 # Symbolic values may return symbolic expressions from `==`, so use `isequal`.
 _contains_equal(values, target) = any(value -> isequal(value, target), values)
 
+_additive_terms(expr) = collect(terms(unwrap(expr)))
+
+_multiplicative_factors(expr) = collect(Symbolics.factors(unwrap(expr)))
+
 function simplify!(expr::Symbolics.Num)
     return Symbolics.simplify(expr)
 end

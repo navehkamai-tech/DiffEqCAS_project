@@ -213,7 +213,7 @@ function _expansion_cost(expr)
 
     if op == ^
         base, exponent = args[1], args[2]
-        if exponent isa Int
+        if exponent isa Int && exponent > 0
             return (_expansion_cost(base))^exponent
         else
             return _expansion_cost(base)
@@ -253,4 +253,139 @@ function simplify_system(sys::DiffEqSystem;
         _simplify_branch(branch, options)
         for branch in sys.branches
     ])
+end
+
+
+# old functions
+# need to see if they're still useful and if they need to be refactored
+"""
+Return syntactic numerator-factor candidates shared by every addend.
+
+This function deliberately does not decide whether a factor is cancellable.
+It only computes a conservative candidate list; `factor_divisibility` remains
+the authority for domain-aware cancellation.  Denominator factors are not
+returned because removing a common denominator requires multiplying the
+equation by that denominator, which is a separate, assumption-sensitive
+transformation.
+
+TODO: replace the vectors with multiplicity-aware FactorCandidate records.
+The current ordered intersection preserves duplicate factors conservatively by
+removing one matching occurrence at a time.
+"""
+function common_divisors(expr, sys::DiffEqBranch)
+    expr === nothing && throw(ArgumentError("input expression cannot be empty"))
+
+    normalized = unwrap(simplify(expand(expand_derivatives(wrap(expr)))))
+    addends = _additive_terms(normalized)
+    isempty(addends) && return Any[]
+
+    shared = _multiplicative_factors(first(addends))
+    for addend in Iterators.drop(addends, 1)
+        available = _multiplicative_factors(addend)
+        retained = Any[]
+        for candidate in shared
+            index = findfirst(factor -> isequal(factor, candidate), available)
+            index === nothing || (push!(retained, candidate); deleteat!(available, index))
+        end
+
+        common_divisors(expr, sys::DiffEqSystem) =
+            length(sys.branches) == 1 ?
+            common_divisors(expr, only(sys.branches)) :
+            throw(ArgumentError("common divisors require one selected branch"))
+        shared = retained
+        isempty(shared) && break
+    end
+
+    # Numeric constants do not improve an equation and can introduce
+    # avoidable type conversions during division.
+    [
+        wrap(factor) for factor in _ordered_unique(shared)
+                         if !(SymbolicUtils.unwrap_const(Symbolics.unwrap(factor)) isa Number)
+    ]
+end
+
+# helpers for group_coefficients
+function _is_target(e, unwrapped_dvs::Set, dv_ops)
+    # If it is a leaf node, check if it matches any dvendent variable directly
+    if !SymbolicUtils.istree(e)
+        return e in unwrapped_dvs
+    end
+
+    op = SymbolicUtils.operation(e)
+
+    # Check if the operation matches any of our base dependent operations
+    if any(isequal(op, d_op) for d_op in dv_ops)
+        return true
+    end
+
+    # Support mixed derivatives by recursively checking arguments
+    if op isa Differential
+        args = SymbolicUtils.arguments(e)
+        return _is_target(args[1], unwrapped_dvs, dv_ops)
+    end
+
+    return false
+end
+
+function _find_targets!(e, unwrapped_dvs::Set, dv_ops, targets::Set)
+    # If we found a target, add it and stop recursing
+    if _is_target(e, unwrapped_dvs, dv_ops)
+        push!(targets, e)
+        return
+    end
+
+    # Otherwise, keep digging through the expression tree
+    if SymbolicUtils.istree(e)
+        for arg in SymbolicUtils.arguments(e)
+            _find_targets!(arg, unwrapped_dvs, dv_ops, targets)
+        end
+    end
+end
+
+function _diff_depth(e)
+    if !SymbolicUtils.istree(e)
+        return 0
+    end
+
+    # Increment depth for each Differential operation
+    if SymbolicUtils.operation(e) isa Differential
+        return 1 + _diff_depth(SymbolicUtils.arguments(e)[1])
+    end
+
+    return 0
+end
+
+function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
+    expr = expand_derivatives(unwrap(eq.lhs - eq.rhs))
+
+    unwrapped_dvs = Set([unwrap(d) for d in dvs])
+    dv_ops = [SymbolicUtils.operation(unwrap(d)) for d in dvs]
+    targets = Set()
+
+    # Pass the required state into the mutator function
+    _find_targets!(expr, unwrapped_dvs, dv_ops, targets)
+
+    # Sort targets safely using the external helper
+    sorted_targets = sort(collect(targets), by=_diff_depth, rev=true)
+
+    grouped_expr = 0
+    remainder = expr
+
+    for target in sorted_targets
+        max_deg = Symbolics.degree(remainder)
+        for p in max_deg:-1:1
+            target_term = p==1 ? target : target^p
+            coeff = simplify(Symbolics.coeff(remainder, target_term))
+
+            if !isequal(coeff, 0)
+                grouped_expr += coeff * wrap(target)
+                remainder = simplify(remainder - coeff * target_term)
+            end
+
+        end
+    end
+
+    grouped_expr += simplify(remainder)
+
+    return grouped_expr ~ 0
 end
