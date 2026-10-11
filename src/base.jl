@@ -182,12 +182,12 @@ struct RootBranch
 end
 
 function RootBranch(DiffEqBranch)
-    ivs = Tuple(DiffEqBranch.ivs...)
-    dvs = Tuple(DiffEqBranch.dvs...)
-    ps = Tuple(DiffEqBranch.ps...)
-    eqs = Tuple(DiffEqBranch.eqs...)
-    bcs = Tuple(DiffEqBranch.bcs...)
-    RootBranch(ivs, dvs, ps, eqs, bcs, domain)
+    ivs = tuple(DiffEqBranch.ivs...)
+    dvs = tuple(DiffEqBranch.dvs...)
+    ps = tuple(DiffEqBranch.ps...)
+    eqs = tuple(DiffEqBranch.eqs...)
+    bcs = tuple(DiffEqBranch.bcs...)
+    RootBranch(ivs, dvs, ps, eqs, bcs, DiffEqBranch.domain)
 end
 
 struct SystemRoot
@@ -199,7 +199,7 @@ function SystemRoot(branches::Vector{<:DiffEqBranch}=DiffEqBranch[])
     for branch in branches
         push!(root_branches, RootBranch(branch))
     end
-    SystemRoot(Tuple(root_branches...))
+    SystemRoot(tuple(root_branches...))
 end
 
 SystemRoot(branch::DiffEqBranch) = SystemRoot([branch])
@@ -215,22 +215,23 @@ mutable struct DiffEqSystem
     branches::Vector{DiffEqBranch}
     pending::Stack{DiffEqBranch} #I think I want to move the pending field
     completed::Vector{DiffEqBranch}
-    root::SystemRoot
+    root::Union{Nothing,SystemRoot}
 end
 
 SystemRoot(sys::DiffEqSystem) = SystemRoot(sys.branches)
 
-function record_root!(branches::Vector{<:DiffEqBranch})
-    root === nothing && DiffEqSystem.root = SystemRoot(branches)
+function record_root!(system::DiffEqSystem, branches::Vector{<:DiffEqBranch}=system.branches)
+    # Root snapshots belong to a system instance, not to the DiffEqSystem type.
+    system.root === nothing && setfield!(system, :root, SystemRoot(branches))
+    system
 end
 
 function DiffEqSystem(branches::Vector{<:DiffEqBranch}=DiffEqBranch[], record_root=true)
     normalized = DiffEqBranch[branches...]
     if record_root
-        DiffEqSystem(normalized, Stack{DiffEqBranch}(), DiffEqBranch[], SystemRoot(branches))
+        return DiffEqSystem(normalized, Stack{DiffEqBranch}(), DiffEqBranch[], SystemRoot(branches))
     end
-    println("danger: root is not recorded")
-    DiffEqSystem(normalized, Stack{DiffEqBranch}(), DiffEqBranch[], root=nothing)
+    DiffEqSystem(normalized, Stack{DiffEqBranch}(), DiffEqBranch[], nothing)
 end
 
 function DiffEqSystem(eqs, bcs, domain, ivs, dvs; kwargs...)
@@ -268,7 +269,7 @@ function _replace_branch!(
 end
 
 function Base.getproperty(system::DiffEqSystem, name::Symbol)
-    name in (:branches, :pending, :completed) &&
+    name in (:branches, :pending, :completed, :root) &&
         return getfield(system, name)
     length(system.branches) == 1 ||
         throw(ArgumentError("$(name) is branch-specific; select a branch first"))
@@ -276,7 +277,7 @@ function Base.getproperty(system::DiffEqSystem, name::Symbol)
 end
 
 function Base.setproperty!(system::DiffEqSystem, name::Symbol, value)
-    name in (:branches, :pending, :completed) &&
+    name in (:branches, :pending, :completed, :root) &&
         return setfield!(system, name, value)
     length(system.branches) == 1 ||
         throw(ArgumentError("$(name) is branch-specific; select a branch first"))
