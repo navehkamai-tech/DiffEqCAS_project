@@ -28,6 +28,15 @@ positive_n = Symbolics.setmetadata(n, DiffEqCAS.VarSign, DiffEqCAS.positive)
 @test DiffEqCAS._relation_sign(positive_n * x < -positive_a, x) === DiffEqCAS.negative
 @test DiffEqCAS._constraints_exclude_zero([x^positive_n > 0], x)
 
+@test DiffEqCAS._bound_sign(3) == (sign=DiffEqCAS.positive, iszero=false)
+@test DiffEqCAS._bound_sign(0) == (sign=DiffEqCAS.undetermined, iszero=true)
+@test DiffEqCAS._bound_sign(positive_a + positive_a).sign === DiffEqCAS.positive
+
+positive_x = Symbolics.setmetadata(x, DiffEqCAS.VarSign, DiffEqCAS.positive)
+strict_sign_system = DiffEqSystem([], [], [], [x], [])
+@test DiffEqCAS.factor_divisibility(positive_x * positive_a, strict_sign_system).status ===
+    DiffEqCAS.divisible
+
 system = DiffEqSystem([], [], [x => [2x > 0]], [x], [])
 @test DiffEqCAS.factor_divisibility(x, system).status === DiffEqCAS.divisible
 
