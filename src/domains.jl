@@ -4,8 +4,6 @@ const cache_size = Ref{Int64}(1024)
 global cache = LRU{Any,Any}(maxsize=cache_size[])
 
 @enum SignState positive negative either undetermined
-struct VarSign end
-Symbolics.option_to_metadata_type(::Val{:sign}) = VarSign
 
 function get_sign(var)
     value = unwrap(var)

@@ -18,17 +18,11 @@ export SimplificationStep, simplify_system
 include("base.jl")
 include("utils.jl")
 include("domains.jl")
-
-# 2. Core symbolic logic
 include("symbolic_rules.jl")
-
-# 3. Independent modules
 include("display.jl")
 include("divisibility.jl")
-include("simplification.jl")
 include("units.jl")
-
-# 4. High-level operations
+include("simplification.jl")
 include("transformations.jl")
 include("special_algorithms.jl")
 
