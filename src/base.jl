@@ -296,19 +296,3 @@ function complete_branch!(system::DiffEqSystem, branch::DiffEqBranch)
     push!(system.completed, branch)
     branch
 end
-
-const cache_size = Ref{Int64}(1024)
-
-global cache = LRU{Any,Any}(maxsize=cache_size[])
-
-@enum SignState positive negative either undetermined
-struct VarSign end
-Symbolics.option_to_metadata_type(::Val{:sign}) = VarSign
-
-function get_sign(var)
-    value = unwrap(var)
-    value isa Real && return value > 0 ? positive : value < 0 ? negative : undetermined
-    Symbolics.getmetadata(value, VarSign, undetermined)
-end
-
-@enum DivisState divisible haszero undetermined

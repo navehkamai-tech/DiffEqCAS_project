@@ -133,7 +133,30 @@ end
 
 _valid_node_count(expr::Symbolics.Num, max_node_count) = robust_node_count(expr)>max_node_count ? false : true
 
-function _attempt_expand_derivatives!(expr::Symbolics.Num, options::SimplificationOptions)
+const normalization_rules = [
+    # 1. Radical Normalization Rules    
+    @rule(sqrt(~x) => (~x)^(1//2)),
+    @rule(cbrt(~x) => (~x)^(1//3)),
+    @rule(fourthroot(~x) => (~x)^(1//4)),
+    # 2. Trigonometric Normalization Rules
+    @rule(sec(~x) => cos(~x)^-1),
+    @rule(csc(~x) => sin(~x)^-1),
+    @rule(cot(~x) => cos(~x) * sin(~x)^-1),
+    # 3. Exact Rational Normalization
+    @rule(~n::AbstractFloat => rationalize(~n))
+]
+
+const NORMALIZER = Postwalk(PassThrough(Chain(normalization_rules)))
+
+function normalize_expr(expr::Symbolics.Num)
+    return wrap(NORMALIZER(unwrap(expr)))
+end
+
+function normalize_expr(expr::Expr)
+    return NORMALIZER(expr)
+end
+
+function _attempt_expand_derivatives(expr::Symbolics.Num, options::SimplificationOptions)
     options.expand_derivatives==true || return expr
     expansion_candidate = expand_derivatives(expr, simplify=true)
     nodes_count = robust_node_count(expansion_candidate)
@@ -141,59 +164,77 @@ function _attempt_expand_derivatives!(expr::Symbolics.Num, options::Simplificati
     return expansion_candidate
 end
 
-function _attempt_expand_products!(expr::Symbolics.Num, options::SimplificationOptions)
-    options.expand_products==true || return expr
-    return expand(expr)
+const Algebraic_ops = Set([:+, :*, :^])
+
+function _algebraic_regions(expr, dummy_to_expr::Dict, expr_to_dummy::Dict, counter::Base.RefValue{Int}, is_parent_alg::Bool=false)
+    if !SymbolicUtils.istree(expr)
+        return expr
+    end
+
+    op = SymbolicUtils.operation(expr)
+    is_alg = op ∈ Algebraic_ops
+    args = SymbolicUtils.arguments(expr)
+
+    new_args=[_algebraic_regions(arg, dummy_to_expr, expr_to_dummy, is_alg, counter) for arg in args]
+
+    new_expr = maketerm(typeof(expr), :call, [op, new_args...], metadata(expr))
+
+    if !is_alg && is_parent_alg
+        if haskey(expr_to_dummy, new_expr)
+            dummy = expr_to_dummy[new_expr]
+            record = dummy_to_expr[dummy]
+            dummy_to_expr[dummy] = (expr=record.expr, count=record.count+1)
+        else
+            dummy = SymbolicUtils.Sym{Real}(Symbol("D_$(counter[])"))
+            counter[] += 1
+            expr_to_dummy[new_expr] = dummy
+            dummy_to_expr[dummy] = (expr=new_expr, count=1)
+            return dummy
+        end
+    end
+
+    return new_expr
+end
+
+function _expansion_cost(expr)
+    if !SymbolicUtils.istree(expr)
+        return 1.0
+    end
+    op = SymbolicUtils.operation(expr)
+    args = SymbolicUtils.arguments(expr)
+
+    if op == +
+        return sum(_expansion_cost(arg) for arg in args)
+    end
+
+    if op == *
+        return prod(_expansion_cost(arg) for arg in args)
+    end
+
+    if op == ^
+        base, exponent = args[1], args[2]
+        if exponent isa Int
+            return (_expansion_cost(base))^exponent
+        else
+            return _expansion_cost(base)
+        end
+    end
 end
 
 function _simplify_branch(sys::DiffEqBranch, options::SimplificationOptions=SimplificationOptions())
     eq_residuals = [_equation_residual(eq) for eq in sys.eqs]
-    halted_eqs = []
-    #1 expand derivatives
-    [_attempt_expand_derivatives!(residual, options) for residual in eq_residuals]
-    #2 distribute multiplication
-    [_attempt_expand_products!(residual, options) for residual in eq_residuals]
-    for idx in 1:length(eq_residuals)
-        _valid_node_count(eq_residuals[idx], options.max_nodes) && continue
-        push!(halted_eqs, popat!(eq_residuals, idx))
-    end
-    #= TODO: impliment the following simplification steps:
-    2) distribute multiplication and expand
-    3) group by differential generators (including transcendental generators like exp(du/dx)) and simplify the resulting coefficients
-    4) divide out allowed common factors using simple factorization & polynomial factorization (expanding after the cancellation)
-    5) do recursively until a fixed point is reached:
-        1) normalize function arguments
-        2) apply function expansion rules 
-        3) divide out allowed common factors using simple factorization & polynomial factorization (expanding after the cancellation)
-        4) normalize function arguments 
-        5) apply function contraction, simplification, and cancellation rules
-        6) divide out allowed common factors using simple factorization & polynomial factorization (expanding after the cancellation)
-    6) normalize function arguments
-    7) simplify each differential generator's coefficients
-    8) normalize equation sign so leading coefficient has positive sign and the differential generators are ordered from left to right by their order
-    9) handle degenerate forms such as 0 ~ 0 or c ~ 0
-=#
-    for _ in 1:options.max_passes
-        pass_start = current
-
-
-
-        isequal(current.eqs, pass_start.eqs) &&
-            isequal(current.bcs, pass_start.bcs) &&
-            isequal(current.restrictions, pass_start.restrictions) &&
-            break
+    #1 basic normalization
+    eq_residuals = [normalize_expr(res) for res in eq_residuals]
+    #2 expand derivatives
+    eq_residuals = [_attempt_expand_derivatives(res, options) for res in eq_residuals]
+    #3 distribute multiplication 
+    counter = Ref(1)
+    if options.expand_products==true
+        expr_to_dummy = Dict{Any,Any}()
+        dummy_to_expr = Dict{Any,Any}()
+        expansion_arr = [_algebraic_regions(unwrap(eq_res), dummy_to_expr, expr_to_dummy, counter) for eq_res in eq_residuals]
     end
 
-    if !isequal(current.eqs, sys.eqs) || !isequal(current.bcs, sys.bcs)
-        current = DiffEqBranch(
-            eqs=current.eqs, ivs=current.ivs, dvs=current.dvs, ps=current.ps,
-            bcs=current.bcs, domain=current.domain, name=current.name,
-            domain_set=current.domain_set, restrictions=current.restrictions,
-            history=append_derivation(sys.history,
-                SimplificationStep(options)),
-        )
-    end
-    current
 end
 
 """

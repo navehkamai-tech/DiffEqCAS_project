@@ -1,4 +1,21 @@
 
+const cache_size = Ref{Int64}(1024)
+
+global cache = LRU{Any,Any}(maxsize=cache_size[])
+
+@enum SignState positive negative either undetermined
+struct VarSign end
+Symbolics.option_to_metadata_type(::Val{:sign}) = VarSign
+
+function get_sign(var)
+    value = unwrap(var)
+    value isa Real && return value > 0 ? positive : value < 0 ? negative : undetermined
+    Symbolics.getmetadata(value, VarSign, undetermined)
+end
+
+@enum DivisState divisible haszero undetermined
+
+
 #operator used for boundary conditions
 @register_symbolic Restrict(expr, domain)
 SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
@@ -126,11 +143,11 @@ end
 # Add constraints to an already-canonical domain. If `ivs` is provided, it
 # controls both the order inside tuple keys and the order of the output groups.
 function add_constraints(
-    domain::SymbolicDomain,
+    domain_pairs,
     new_constraints::AbstractVector,
     ivs=nothing,
 )
-    domain_pairs = _domain_pairs(domain)
+    domain_pairs = _domain_pairs(domain_pairs)
     variable_order = ivs === nothing ? _domain_variables(domain_pairs) : collect(ivs)
     ivs !== nothing && _validate_iv_order!(variable_order, domain_pairs)
     groups = [(Set(_key_variables(key)), collect(Any, constraints))
@@ -156,8 +173,8 @@ function add_constraints(
     return SymbolicDomain(final_pairs, final_variables)
 end
 
-add_constraints(domain_pairs::AbstractVector{<:Pair}, new_constraints::Pair, ivs=nothing) =
-    add_constraints(domain_pairs, [new_constraints], ivs)
+add_constraints(domain_pairs, new_constraints::Pair, ivs=nothing) =
+    add_constraints(domain_pairs.pairs, [new_constraints], ivs)
 
 function restrict_domain(sys::DiffEqBranch, constraint::Symbolics.Num)
     sys.domain=add_constraints(sys.domain, constraint)
