@@ -1,6 +1,7 @@
 
-#helpers for divide_common
-function _bound_sign(expr)
+# Strict sign bounds are cached separately from symbolic metadata so they can
+# be reused by both relation solving and factor divisibility.
+function _bound_sign_uncached(expr)
     literal = SymbolicUtils.unwrap_const(Symbolics.unwrap(expr))
     literal isa Real && return (
         sign=literal > 0 ? positive : literal < 0 ? negative : undetermined,
@@ -56,6 +57,14 @@ function _bound_sign(expr)
     end
 
     return (sign=get_sign(simplified), iszero=false)
+end
+
+function _bound_sign(expr)
+    key = (:bound_sign, Symbolics.unwrap(expr))
+    haskey(cache, key) && return cache[key]
+    result = _bound_sign_uncached(expr)
+    cache[key] = result
+    return result
 end
 
 function _affine_coefficients(expr, iv)
@@ -283,7 +292,6 @@ function _variable_factor_divisibility(factor, components)
         if constraints_satisfiable([factor ≤ 0, factor ≥ 0], component, true)
             return _proven(haszero, :variable_zero_feasibility)
         end
-
         # TODO: This is the old behavior and is only sound when the
         # satisfiability result is certified. Once constraints_satisfiable
         # exposes an unresolved state, return `undetermined` for that state.
@@ -422,6 +430,10 @@ function _factor_divisibility_uncached(factor, sys::DiffEqBranch)
 
     _contains_equal(sys.ps, factor) &&
         return _proven(divisible, :parameter)
+
+    bound = _bound_sign(factor)
+    bound.sign in (positive, negative) &&
+        return _proven(divisible, :strict_sign, bound)
 
     components = _divisibility_components(sys, factor)
     isempty(components) &&
