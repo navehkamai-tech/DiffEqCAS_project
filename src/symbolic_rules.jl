@@ -80,6 +80,30 @@ const u = m_u
 # Rules are grouped by required assumptions and pipeline stage.  The
 # simplification pipeline can later select a safe group without enabling
 # branch-sensitive identities globally.
+
+const normalization_rules = [
+    # 1. Radical Normalization Rules    
+    @rule(sqrt(~x) => (~x)^(1//2)),
+    @rule(cbrt(~x) => (~x)^(1//3)),
+    @rule(fourthroot(~x) => (~x)^(1//4)),
+    # 2. Trigonometric Normalization Rules
+    @rule(sec(~x) => cos(~x)^-1),
+    @rule(csc(~x) => sin(~x)^-1),
+    @rule(cot(~x) => cos(~x) * sin(~x)^-1),
+    # 3. Exact Rational Normalization
+    @rule(~n::AbstractFloat => rationalize(~n))
+]
+
+const NORMALIZER = Postwalk(PassThrough(Chain(normalization_rules)))
+
+function normalize_expr(expr::Symbolics.Num)
+    return wrap(simplify(NORMALIZER(unwrap(expr))))
+end
+
+function normalize_expr(expr::Expr)
+    return simplify(NORMALIZER(expr))
+end
+
 const EXP_LOG_RULES = [
     @rule(~x/exp(~y) => ~x*exp(-~y)),
     @rule(exp(~x)^~n => exp(~x*~n)),

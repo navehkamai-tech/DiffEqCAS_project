@@ -133,31 +133,6 @@ function _factorization_partition(sys::DiffEqBranch, factors)
     DiffEqBranch[]
 end
 
-const normalization_rules = [
-    # 1. Radical Normalization Rules    
-    @rule(sqrt(~x) => (~x)^(1//2)),
-    @rule(cbrt(~x) => (~x)^(1//3)),
-    @rule(fourthroot(~x) => (~x)^(1//4)),
-    # 2. Trigonometric Normalization Rules
-    @rule(sec(~x) => cos(~x)^-1),
-    @rule(csc(~x) => sin(~x)^-1),
-    @rule(cot(~x) => cos(~x) * sin(~x)^-1),
-    # 3. Exact Rational Normalization
-    @rule(~n::AbstractFloat => rationalize(~n))
-]
-
-const NORMALIZER = Postwalk(PassThrough(Chain(normalization_rules)))
-
-function normalize_expr(expr::Symbolics.Num)
-    return wrap(simplify(NORMALIZER(unwrap(expr))))
-end
-
-function normalize_expr(expr::Expr)
-    return simplify(NORMALIZER(expr))
-end
-
-const ALGEBRAIC_OPS = Set([+, *, ^])
-
 mutable struct Region
     dummy::Any
     expr::Any       # unwrapped; may contain dummies of regions created earlier
@@ -172,11 +147,17 @@ mutable struct Abstraction
 end
 Abstraction() = Abstraction(Region[], Dict{Any,Int}(), Dict{Any,Int}())
 
+struct Warning
+    eq_index::Int
+    symbol::Symbol
+    message::String
+end
+
 mutable struct SimplifyContext
     opts::Any                  # simplification options
     stable::Set{Any}           # DUMMY-FREE exprs known to be at a fixpoint
     headroom::Int              # remaining DAG-node allowance
-    warnings::Vector{String}
+    warnings::Vector{Warning}
 end
 SimplifyContext(opts) = SimplifyContext(opts, Set{Any}(), 0, String[])
 
@@ -212,6 +193,8 @@ function _intern!(ab::Abstraction, new_expr)
     ab.regions[i].count += 1
     return ab.regions[i].dummy
 end
+
+const ALGEBRAIC_OPS = Set([+, *, ^])
 
 function _abstract(expr, ab::Abstraction, parent_alg::Bool)
     SymbolicUtils.iscall(expr) || return expr
@@ -372,20 +355,16 @@ function _simplify_regions!(ab::Abstraction, ctx::SimplifyContext)
     return sub
 end
 
-function classify_residuals(residuals, ctx::SimplifyContext)
+function classify_residuals!(residuals, ctx::SimplifyContext)
     for (i, res) in enumerate(residuals)
-        class = classify_residual(res)
-        class === :contradiction && push!(ctx.warnings, "residual $i simplified to a contradiction")
-        class === :identity && a #figure out what to do with this
-    end
-end
-
-function classify_residual(res)
-    v = SymbolicUtils.unwrap_const(unwrap(res))
-    if v isa Number
-        return iszero(v) ? :identity : :contradiction
-    else
-        return :normal
+        v = SymbolicUtils.unwrap_const(unwrap(res))
+        local class
+        if v isa Number
+            iszero(v) ? class = :identity : class = :contradiction
+        else
+            class = :normal
+        end
+        (class === :contradiction || class === :identity) && push!(ctx.warnings, Warning(class, i, "residual $i simplified to a $(class)"))
     end
 end
 
@@ -411,7 +390,7 @@ function _algebraic_pass(res, ctx::SimplifyContext)
     return [get(sub, root, root) for root in roots]   # leaves map to themselves
 end
 
-# Placeholder for your symbolic-rule stage. Rules act on whole restored
+# Placeholder for symbolic-rule stage. Rules act on whole restored
 # expressions; abstraction isn't needed here. Run it over unique shared
 # subexpressions with a memo dict if it gets slow.
 function _nonalgebraic_pass(res, ctx::SimplifyContext)
@@ -419,15 +398,19 @@ function _nonalgebraic_pass(res, ctx::SimplifyContext)
     # e.g. return [SymbolicUtils.Postwalk(ctx.rules)(r) for r in res]
 end
 
+function rebuild_branch(sys::DiffEqBranch, eqs, warnings, bcs, restrictions)
+    restrictions = [_normalize_restriction(restriction) for restriction in sys.restrictions]
+    return _with_simplified_expressions(sys, eqs, sys.bcs, restrictions), warnings
+end
 
 #--------------------------------------------------------------------------
 # Top level
 #--------------------------------------------------------------------------
-function _simplify_branch(sys::DiffEqBranch, options::SimplificationOptions=SimplificationOptions())
+function _simplify_branch_eqs(sys::DiffEqBranch, options::SimplificationOptions=SimplificationOptions())
     ctx = SimplifyContext(options)
 
     # Unwrap once here, wrap once in rebuild_branch.
-    res = [Symbolics.unwrap(eq.lhs - eq.rhs) for eq in sys.eqs]
+    res = [unwrap(eq.lhs - eq.rhs) for eq in sys.eqs]
     res = normalize_expr.(res)
     res = [_attempt_expand_derivatives(r, ctx) for r in res]
 
@@ -437,18 +420,16 @@ function _simplify_branch(sys::DiffEqBranch, options::SimplificationOptions=Simp
     for _ in 1:options.max_rounds
         new = _algebraic_pass(res, ctx)
         new = _nonalgebraic_pass(new, ctx)
-        new = normalize_expr.(new)     # canonical order, so sharing is detected
-        new = [_attempt_expand_derivatives(r, ctx) for r in new]  # safe: no dummies here
-        classify_residuals(new)
+        new = [_attempt_expand_derivatives(r, ctx) for r in new]
 
-        new in seen && (res=new; break)
-        push!(seen, new)
         res = new
+        new in seen && break
+        push!(seen, new)
         ctx.headroom <= 0 && break
     end
 
-    _audit!(res, ctx)
-    return rebuild_branch(sys, Symbolics.wrap.(res), ctx.warnings)
+    classify_residuals!(res, ctx)
+    return rebuild_branch(sys, wrap.(res), ctx.warnings)
 end
 
 """

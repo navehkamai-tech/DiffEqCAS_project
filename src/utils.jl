@@ -8,8 +8,11 @@ _additive_terms(expr) = collect(terms(unwrap(expr)))
 
 _multiplicative_factors(expr) = collect(Symbolics.factors(unwrap(expr)))
 
-function simplify!(expr::Symbolics.Num)
-    return Symbolics.simplify(expr)
+function _res_to_eq(res)
+    if res isa Symbolics.Num || res isa Expr
+        return Symbolics.Equation(wrap(res), 0)
+    end
+    throw(ArgumentError("Cannot convert $(typeof(res)) to an equation"))
 end
 
 function _find_matches(arr_A, arr_B)
