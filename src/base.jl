@@ -86,8 +86,12 @@ domain_components(domain::SymbolicDomain) = copy(domain.pairs)
 
 abstract type DerivationStep end
 
+struct Step
+    cause::Union{Nothing,Int} #in the future special algorithms could also be referenced as the cause of a step
+    step::DerivationStep
+end
 struct DerivationHistory
-    steps::Vector{DerivationStep}
+    steps::Vector{Step}
 end
 
 DerivationHistory() = DerivationHistory(DerivationStep[])
@@ -96,35 +100,37 @@ function append_derivation(history::DerivationHistory, step::DerivationStep)
     DerivationHistory(vcat(history.steps, [step]))
 end
 
-struct CoordTransformStep <: DerivationStep
+struct CoordTransform <: DerivationStep
+    meta::
     iv_mapping::Dict
     old_ivs::Vector{Symbolics.Num}
     new_ivs::Vector{Symbolics.Num}
-    jacobian_inverse::Any
 end
 
-struct ParamTransformStep <: DerivationStep
+struct ParamTransform <: DerivationStep
     mapping::Dict
     old_parameters::Vector{Symbolics.Num}
     new_parameters::Vector{Symbolics.Num}
 end
 
-struct DepVarTransformStep <: DerivationStep
+struct DepTransform <: DerivationStep
     mapping::Dict
     old_dvs::Vector{Symbolics.Num}
     new_dvs::Vector{Symbolics.Num}
 end
 
-struct FactorStep <: DerivationStep
+struct Factor <: DerivationStep
     factors::Vector{Any}
     selected_factor::Any
     branch_index::Union{Nothing,Int}
 end
 
-struct DomainRestrictStep <: DerivationStep
+struct RestrictDomain <: DerivationStep
     variables::Vector{Symbolics.Num}
     constraint::Symbolics.Num
 end
+
+
 
 mutable struct DiffEqBranch{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symbolics.Num},P<:AbstractVector{<:Symbolics.Num},E<:AbstractVector{<:Symbolics.Equation},B<:AbstractVector{<:Symbolics.Equation}}
     name::String

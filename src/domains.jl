@@ -162,7 +162,7 @@ add_constraints(domain_pairs, new_constraints::Pair, ivs=nothing) =
 function restrict_domain(sys::DiffEqBranch, constraint::Symbolics.Num)
     sys.domain=add_constraints(sys.domain, constraint)
     vars = Symbolics.get_variables(constraint)
-    push!(sys.history.steps, DomainRestrictStep(vars, constraint))
+    push!(sys.history.steps, RestrictDomain(vars, constraint))
 end
 
 const ROI = Ref{Float64}(1000.0)

@@ -43,7 +43,7 @@ using DiffEqCAS
 
 # Core Structures
 DiffEqSystem, DiffEqBranch, SymbolicDomain, SymbolicRestriction, domain_variables, domain_components, push_branch!, complete_branch!
-DerivationStep, DerivationHistory, CoordTransformStep, ParamTransformStep, DepVarTransformStep, FactorStep, SimplificationStep
+DerivationStep, DerivationHistory, CoordTransform, ParamTransform, DepTransform, Factor, SimplificationStep
 
 # Transformation functions
 change_dvs!, change_ivs!, change_parameters!

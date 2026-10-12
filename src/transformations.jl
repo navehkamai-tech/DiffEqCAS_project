@@ -37,7 +37,7 @@ function change_parameters!(sys::DiffEqBranch, param_mapping::Dict)
         sys.restrictions,
         residual -> simplify(SPECIAL_REWRITER(substitute(residual, param_mapping))))
     # *need to add a helper function for getting the new domains
-    step = ParamTransformStep(
+    step = ParamTransform(
         param_mapping, sys.ps, new_params)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs,
         ps=new_params, bcs=transformed_bcs, domain=sys.domain,
@@ -203,7 +203,7 @@ function change_ivs!(sys::DiffEqBranch, new_ivs::Vector{Symbolics.Num}, iv_mappi
     new_domains = transform_domains(sys.domain, iv_mapping, final_ivs)
 
     new_dvs = [Symbolics.wrap(custom_rewrite(unwrap(dv), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)) for dv in sys.dvs]
-    step = CoordTransformStep(
+    step = CoordTransform(
         iv_mapping, sys.ivs, new_ivs, J_inv)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs,
         ps=params, bcs=transformed_bcs, domain=new_domains,
@@ -321,7 +321,7 @@ function change_dvs!(sys::DiffEqBranch, new_dvs::Vector{Symbolics.Num}, dv_mappi
 
     # Passing sys.params assuming you want to retain the original params block manually
     mapping = Dict(old_dvs .=> dv_exprs)
-    step = DepVarTransformStep(mapping, sys.dvs, final_dvs)
+    step = DepTransform(mapping, sys.dvs, final_dvs)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs,
         ps=params, bcs=transformed_bcs, domain=sys.domain,
         restrictions=transformed_restrictions,
