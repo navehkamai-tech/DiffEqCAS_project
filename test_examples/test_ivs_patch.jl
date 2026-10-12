@@ -6,7 +6,7 @@ using DomainSets
 using DiffEqCAS
 
 function get_base_op(expr)
-    if SymbolicUtils.istree(expr)
+    if SymbolicUtils.iscall(expr)
         op = SymbolicUtils.operation(expr)
         if op == getindex
             return get_base_op(SymbolicUtils.arguments(expr)[1])
@@ -17,7 +17,7 @@ function get_base_op(expr)
 end
 
 @parameters t x y
-@variables u(t,x,y)[1:3]
+@variables u(t, x, y)[1:3]
 
 sys_dvs = [u[1], u[2], u[3]]
 

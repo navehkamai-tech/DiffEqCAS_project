@@ -54,7 +54,7 @@ function custom_rewrite(expr, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, c
     end
 
     # Base case: if it's not a tree (like a standalone x), replace if mapped
-    if !SymbolicUtils.istree(expr)
+    if !SymbolicUtils.iscall(expr)
         res = haskey(var_map, expr) ? var_map[expr] : expr
         cache[expr] = res
         return res
@@ -219,7 +219,7 @@ function substitute_dvs(expr, old_dvs, dv_exprs, ivs, cache=Dict())
         return cache[expr]
     end
 
-    if !SymbolicUtils.istree(expr)
+    if !SymbolicUtils.iscall(expr)
         cache[expr] = expr
         return expr
     end

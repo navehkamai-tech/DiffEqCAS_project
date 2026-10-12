@@ -2,7 +2,7 @@
 
 julia_version = "1.13.0"
 manifest_format = "2.1"
-project_hash = "130a6d5e4ae06bd5ff7013c05482717b492a62ac"
+project_hash = "1b9d361af16e2c7c9969840f7c67ae8894d55c08"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -498,7 +498,7 @@ version = "7.21.2"
     Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [[deps.DiffEqCAS]]
-deps = ["AbstractTrees", "BenchmarkTools", "DataStructures", "Debugger", "DomainSets", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LRUCache", "LaTeXStrings", "Latexify", "LinearAlgebra", "Memoize", "ModelingToolkit", "Nemo", "Pluto", "PlutoUI", "Revise", "SpecialFunctions", "StaticArrays", "SymbolicUtils", "Symbolics", "TermInterface", "Unitful"]
+deps = ["AbstractTrees", "BenchmarkTools", "Combinatorics", "DataStructures", "Debugger", "DomainSets", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LRUCache", "LaTeXStrings", "Latexify", "LinearAlgebra", "Memoize", "ModelingToolkit", "Nemo", "Pluto", "PlutoUI", "Revise", "SpecialFunctions", "StaticArrays", "SymbolicUtils", "Symbolics", "TermInterface", "Unitful"]
 path = "."
 uuid = "2bd819c4-9fc0-462e-83be-792a2297597c"
 version = "0.1.0"

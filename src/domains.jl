@@ -209,7 +209,7 @@ function _domain_interval_value(expr, variables, box)
         isequal(unwrapped, Symbolics.unwrap(variable)) &&
             return box[index]
     end
-    SymbolicUtils.istree(unwrapped) || return interval(-Inf, Inf)
+    SymbolicUtils.iscall(unwrapped) || return interval(-Inf, Inf)
     op = SymbolicUtils.operation(unwrapped)
     args = SymbolicUtils.arguments(unwrapped)
     values = [_domain_interval_value(arg, variables, box) for arg in args]

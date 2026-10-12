@@ -68,7 +68,7 @@ function _has_depvar_or_diff(expr)
 
     for v in vars
         v_un = Symbolics.unwrap(v)
-        if SymbolicUtils.istree(v_un)
+        if SymbolicUtils.iscall(v_un)
             op = SymbolicUtils.operation(v_un)
             if op isa Differential || op isa SymbolicUtils.Sym
                 return true
@@ -105,7 +105,7 @@ function extract_parameters(list::Tuple)
 end
 
 function get_base_op(expr)
-    if SymbolicUtils.istree(expr)
+    if SymbolicUtils.iscall(expr)
         op = SymbolicUtils.operation(expr)
         if op == getindex
             return get_base_op(SymbolicUtils.arguments(expr)[1])
@@ -120,7 +120,7 @@ function _count_nodes(node)
 
     if hasmethod(TermInterface.isexpr, Tuple{typeof(node)}) && TermInterface.isexpr(node)
         count += sum(_count_nodes(c) for c in TermInterface.children(node); init=0)
-    elseif SymbolicUtils.istree(node)
+    elseif SymbolicUtils.iscall(node)
         count += sum(_count_nodes(c) for c in SymbolicUtils.arguments(node); init=0)
     end
 

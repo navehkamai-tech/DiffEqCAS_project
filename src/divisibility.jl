@@ -150,7 +150,7 @@ function _infer_tree(expr, components)
 
     # 3. Recursive subexpression inference
     simplified = simplify(expr)
-    SymbolicUtils.istree(simplified) || return ConstraintEvidence(interval(-Inf, Inf), undetermined, undetermined) #[cite: 1]
+    SymbolicUtils.iscall(simplified) || return ConstraintEvidence(interval(-Inf, Inf), undetermined, undetermined) #[cite: 1]
 
     op = SymbolicUtils.operation(simplified)
     args = SymbolicUtils.arguments(simplified)
@@ -217,7 +217,7 @@ end
 function _affine_coefficients(expr, iv)
     isequal(expr, iv) && return (one(expr), zero(expr))
     _contains_equal(Symbolics.get_variables(expr), iv) || return (zero(expr), expr)
-    SymbolicUtils.istree(expr) || return nothing
+    SymbolicUtils.iscall(expr) || return nothing
     op = SymbolicUtils.operation(expr)
     args = SymbolicUtils.arguments(expr)
     if op === (+)
@@ -450,7 +450,7 @@ function _has_depvar_or_diff(expr, sys::DiffEqBranch)
         Symbolics.get_variables(Symbolics.unwrap(expr))) && return true
 
     expression = Symbolics.unwrap(expr)
-    SymbolicUtils.istree(expression) || return false
+    SymbolicUtils.iscall(expression) || return false
     Symbolics.operation(expression) isa Differential && return true
     any(argument -> _has_depvar_or_diff(argument, sys),
         SymbolicUtils.arguments(expression))

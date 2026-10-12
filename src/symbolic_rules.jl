@@ -137,7 +137,7 @@ const SYMBOLIC_RULE_GROUPS = (
 
 
 function is_array_literal(x)
-    return SymbolicUtils.istree(x) && SymbolicUtils.operation(x) === SymbolicUtils.array_literal
+    return SymbolicUtils.iscall(x) && SymbolicUtils.operation(x) === SymbolicUtils.array_literal
 end
 
 # 2. Define the rule arrays as constants

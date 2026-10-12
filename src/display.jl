@@ -4,7 +4,7 @@ function display_expr(expr)
     expr_unwrapped = Symbolics.unwrap(expr)
 
     # 1. Base Case: If it's just a variable (x) or a number (5), leave it alone
-    if !SymbolicUtils.istree(expr_unwrapped)
+    if !SymbolicUtils.iscall(expr_unwrapped)
         return expr
     end
 
@@ -17,7 +17,7 @@ function display_expr(expr)
         curr = expr_unwrapped
 
         # Dig all the way down the nested rabbit hole and collect the variables
-        while SymbolicUtils.istree(curr) && SymbolicUtils.operation(curr) isa Differential
+        while SymbolicUtils.iscall(curr) && SymbolicUtils.operation(curr) isa Differential
             push!(vars, SymbolicUtils.operation(curr).x)
             curr = SymbolicUtils.arguments(curr)[1]
         end

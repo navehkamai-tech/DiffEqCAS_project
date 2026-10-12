@@ -5,11 +5,11 @@ using DomainSets
 using DiffEqCAS
 
 @parameters t x y
-@variables u(t,x,y)[1:3]
+@variables u(t, x, y)[1:3]
 
 u_unwrapped = Symbolics.unwrap(u[1])
 println("typeof u[1]: ", typeof(u_unwrapped))
-println("is_tree(u[1]): ", SymbolicUtils.istree(u_unwrapped))
+println("is_tree(u[1]): ", SymbolicUtils.iscall(u_unwrapped))
 println("operation(u[1]): ", SymbolicUtils.operation(u_unwrapped))
 println("arguments(u[1]): ", SymbolicUtils.arguments(u_unwrapped))
 

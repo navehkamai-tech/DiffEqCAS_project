@@ -6,32 +6,34 @@ The pass limit is deliberately explicit. Simplification can increase
 expression size, so the number of fixed-point passes is bounded.
 """
 Base.@kwdef struct SimplificationOptions
-    max_passes::Int = 4
-    max_system_passes::Int = 4
-    max_branches::Int = 256
-    max_nodes::Int = 100_000
-    max_derivative_nodes::Int = 50_000
+    # Iteration caps
+    max_stabilizer_passes::Int = 4      # per-region rounds in _improve
+    max_rounds::Int = 4                 # outer fixpoint over phases
 
+    # Size limits (DAG nodes, matching the region storage)
+    max_nodes::Int = 100_000            # total headroom for the algebraic pass
+    max_derivative_nodes::Int = 50_000  # reject a derivative expansion above this
+
+    # Feature switches (only things that currently have code behind them)
     expand_derivatives::Bool = true
-    expand_products::Bool = true
-    collect_generators::Bool = true
-    enable_cancellation::Bool = true
-    enable_factorization::Bool = false
-    enable_function_rules::Bool = false
-    enable_system_reduction::Bool = false
-    enable_branch_splitting::Bool = false # dependent-variable cases only
-    enable_differential_consequences::Bool = false
+    expand_products::Bool = true        # gates `expand` in _improve only
 
-    normal_form::Symbol = :collected
-    reduction_strategy::Symbol = :conservative
+    # Symbolic rules for _nonalgebraic_pass, composed by the caller, e.g.
+    #   rules = [collect_generators_rule, cancellation_rule]
+    # Empty means the phase is a no-op. Add the normal_form field here only
+    # if normalize_expr reads it.
+    rules::Vector{Any} = Any[]
+
+    function SimplificationOptions(msp, mr, mn, mdn, ed, ep, rules)
+        msp >= 1 || throw(ArgumentError("max_stabilizer_passes must be >= 1"))
+        mr >= 1 || throw(ArgumentError("max_rounds must be >= 1"))
+        mn >= 1 || throw(ArgumentError("max_nodes must be >= 1"))
+        mdn >= 0 || throw(ArgumentError("max_derivative_nodes must be >= 0"))
+        return new(msp, mr, mn, mdn, ed, ep, rules)
+    end
 end
-
 struct SimplificationStep <: DerivationStep
     options::SimplificationOptions
-end
-
-function _equation_residual(eq::Symbolics.Equation)
-    return (eq.lhs - eq.rhs)~0
 end
 
 """
@@ -131,8 +133,6 @@ function _factorization_partition(sys::DiffEqBranch, factors)
     DiffEqBranch[]
 end
 
-_valid_node_count(expr::Symbolics.Num, max_node_count) = robust_node_count(expr)>max_node_count ? false : true
-
 const normalization_rules = [
     # 1. Radical Normalization Rules    
     @rule(sqrt(~x) => (~x)^(1//2)),
@@ -149,92 +149,306 @@ const normalization_rules = [
 const NORMALIZER = Postwalk(PassThrough(Chain(normalization_rules)))
 
 function normalize_expr(expr::Symbolics.Num)
-    return wrap(NORMALIZER(unwrap(expr)))
+    return wrap(simplify(NORMALIZER(unwrap(expr))))
 end
 
 function normalize_expr(expr::Expr)
-    return NORMALIZER(expr)
+    return simplify(NORMALIZER(expr))
 end
 
-function _attempt_expand_derivatives(expr::Symbolics.Num, options::SimplificationOptions)
-    options.expand_derivatives==true || return expr
-    expansion_candidate = expand_derivatives(expr, simplify=true)
-    nodes_count = robust_node_count(expansion_candidate)
-    nodes_count >= options.max_derivative_nodes && return expr
-    return expansion_candidate
+const ALGEBRAIC_OPS = Set([+, *, ^])
+
+mutable struct Region
+    dummy::Any
+    expr::Any       # unwrapped; may contain dummies of regions created earlier
+    count::Int      # number of direct uses
+    state::Symbol   # :stable (skipped), :converged, :capped
 end
 
-const Algebraic_ops = Set([:+, :*, :^])
+mutable struct Abstraction
+    regions::Vector{Region}          # creation order == dependency order
+    index::Dict{Any,Int}             # abstracted expr -> position in regions
+    by_dummy::Dict{Any,Int}          # dummy -> position in regions
+end
+Abstraction() = Abstraction(Region[], Dict{Any,Int}(), Dict{Any,Int}())
 
-function _algebraic_regions(expr, dummy_to_expr::Dict, expr_to_dummy::Dict, counter::Base.RefValue{Int}, is_parent_alg::Bool=false)
-    if !SymbolicUtils.istree(expr)
-        return expr
+mutable struct SimplifyContext
+    opts::Any                  # simplification options
+    stable::Set{Any}           # DUMMY-FREE exprs known to be at a fixpoint
+    headroom::Int              # remaining DAG-node allowance
+    warnings::Vector{String}
+end
+SimplifyContext(opts) = SimplifyContext(opts, Set{Any}(), 0, String[])
+
+#--------------------------------------------------------------------------
+# Abstraction (expression -> skeleton with dummies)
+#--------------------------------------------------------------------------
+
+# D of a variable, of x(t), or of nested D of those, behaves like a leaf.
+function _is_atomic(a)
+    SymbolicUtils.iscall(a) || return true
+    op = SymbolicUtils.operation(a)
+    op isa SymbolicUtils.Symbolic && return true     # unknown function x(t)
+    op isa SymbolicUtils.Differential &&
+        return _is_atomic(SymbolicUtils.arguments(a)[1])
+    return false
+end
+
+function _is_transparent_diff(expr)
+    op = SymbolicUtils.operation(expr)
+    return op isa SymbolicUtils.Differential &&
+        _is_atomic(SymbolicUtils.arguments(expr)[1])
+end
+
+# Look up or create the region for `new_expr`; returns its dummy.
+function _intern!(ab::Abstraction, new_expr)
+    i = get!(ab.index, new_expr) do
+        n = length(ab.regions) + 1
+        d = SymbolicUtils.Sym{Real}(Symbol("_D_", n))  # can't collide with user names
+        push!(ab.regions, Region(d, new_expr, 0, :converged))
+        ab.by_dummy[d] = n
+        n
     end
+    ab.regions[i].count += 1
+    return ab.regions[i].dummy
+end
+
+function _abstract(expr, ab::Abstraction, parent_alg::Bool)
+    SymbolicUtils.iscall(expr) || return expr
+    _is_transparent_diff(expr) && return expr
 
     op = SymbolicUtils.operation(expr)
-    is_alg = op ∈ Algebraic_ops
+    is_alg = op in ALGEBRAIC_OPS
+    new_args = [_abstract(a, ab, is_alg) for a in SymbolicUtils.arguments(expr)]
+    new_expr = maketerm(typeof(expr), op, new_args, SymbolicUtils.metadata(expr))
+
+    # A non-algebraic node under an algebraic parent becomes a region.
+    return (!is_alg && parent_alg) ? _intern!(ab, new_expr) : new_expr
+end
+
+# A root is abstracted, then interned itself, so it becomes the last region
+# for that residual. Bare leaves (a lone symbol or number) need no region.
+function _abstract_root!(expr, ab::Abstraction)
+    skeleton = _abstract(expr, ab, false)
+    return SymbolicUtils.iscall(skeleton) ? _intern!(ab, skeleton) : skeleton
+end
+
+# Resolve in creation order; each region only needs already-resolved dummies.
+function _restore_all(ab::Abstraction)
+    sub = Dict{Any,Any}()
+    for r in ab.regions
+        sub[r.dummy] = Symbolics.substitute(r.expr, sub)
+    end
+    return sub
+end
+
+# Dummies directly referenced by an expression (for dependency tracking).
+function _dummies_in(expr, ab::Abstraction, acc=Set{Int}())
+    if SymbolicUtils.iscall(expr)
+        foreach(a -> _dummies_in(a, ab, acc), SymbolicUtils.arguments(expr))
+    elseif haskey(ab.by_dummy, expr)
+        push!(acc, ab.by_dummy[expr])
+    end
+    return acc
+end
+
+#--------------------------------------------------------------------------
+# Cost / size helpers
+#--------------------------------------------------------------------------
+
+# Region bodies contain dummies as leaves, so this is automatically a DAG
+# measure when summed over regions. Delegates to your existing counter.
+_size(expr) = robust_node_count(expr)
+
+# Estimated term count after full expansion, with early exit.
+# Returns Inf as soon as the estimate exceeds `cap`, so it never overflows
+# and never does the expensive arithmetic for hopeless cases.
+function _expansion_cost(expr, cap::Real)
+    SymbolicUtils.iscall(expr) || return 1.0
+    op = SymbolicUtils.operation(expr)
     args = SymbolicUtils.arguments(expr)
+    _is_transparent_diff(expr) && return 1.0
+    isempty(args) && return 1.0
 
-    new_args=[_algebraic_regions(arg, dummy_to_expr, expr_to_dummy, is_alg, counter) for arg in args]
-
-    new_expr = maketerm(typeof(expr), :call, [op, new_args...], metadata(expr))
-
-    if !is_alg && is_parent_alg
-        if haskey(expr_to_dummy, new_expr)
-            dummy = expr_to_dummy[new_expr]
-            record = dummy_to_expr[dummy]
-            dummy_to_expr[dummy] = (expr=record.expr, count=record.count+1)
+    c = if op === +
+        sum(a -> _expansion_cost(a, cap), args)
+    elseif op === *
+        prod(a -> _expansion_cost(a, cap), args)
+    elseif op === ^
+        base_cost = _expansion_cost(args[1], cap)
+        n = SymbolicUtils.unwrap_const(Symbolics.unwrap(args[2]))
+        if n isa Real && isinteger(n) && n > 1 && base_cost > 1
+            # C(base_cost + n - 1, n) as a running product with early exit
+            r = 1.0
+            for k in 1:Int(n)
+                r *= (base_cost - 1 + k) / k
+                r > cap && return Inf
+            end
+            r
         else
-            dummy = SymbolicUtils.Sym{Real}(Symbol("D_$(counter[])"))
-            counter[] += 1
-            expr_to_dummy[new_expr] = dummy
-            dummy_to_expr[dummy] = (expr=new_expr, count=1)
-            return dummy
+            base_cost
+        end
+    else
+        max(1.0, sum(a -> _expansion_cost(a, cap), args))
+    end
+    return c > cap ? Inf : c
+end
+
+#--------------------------------------------------------------------------
+# Per-region improvement
+#--------------------------------------------------------------------------
+
+# Simplify (and conditionally expand) one expression under the shared ledger.
+# Accept/reject decisions use MEASURED size; the cost estimate is only a cheap
+# veto to avoid attempting a blow-up. Returns (expr, converged).
+function _improve(expr, ctx::SimplifyContext)
+    base = _size(expr)
+    cur = expr
+    seen = Set{Any}([cur])
+    converged = false
+
+    for _ in 1:ctx.opts.max_stabilizer_passes
+        nxt = simplify(cur)
+
+        # veto is in term units, loosely compared against node headroom;
+        # it only needs to stop pathological cases, the real check is below
+        if _expansion_cost(nxt, ctx.headroom + base) < Inf
+            ex = simplify(expand(nxt))
+            _size(ex) - base <= ctx.headroom && (nxt = ex)
+        end
+
+        if nxt in seen      # fixpoint, or oscillation (both mean stop)
+            converged = true
+            break
+        end
+        push!(seen, nxt)
+        cur = nxt
+    end
+
+    ctx.headroom -= _size(cur) - base    # growth is charged, shrinkage refunded
+    return cur, converged
+end
+
+# Simplify every dirty region, then record which results are trustworthy.
+function _simplify_regions!(ab::Abstraction, ctx::SimplifyContext)
+    # Sweep 1: a region is dirty unless its restored (dummy-free) form is
+    # already known stable. If an inner region changed earlier, the outer's
+    # restored form changes too, so dirtiness propagates without bookkeeping.
+    sub = _restore_all(ab)
+    dirty = Region[]
+    for r in ab.regions
+        if sub[r.dummy] in ctx.stable
+            r.state = :stable
+        else
+            push!(dirty, r)
         end
     end
 
-    return new_expr
-end
+    # High count first (gains are multiplied), cheaper first among ties.
+    sort!(dirty, by=r -> (-r.count, _size(r.expr)))
 
-function _expansion_cost(expr)
-    if !SymbolicUtils.istree(expr)
-        return 1.0
-    end
-    op = SymbolicUtils.operation(expr)
-    args = SymbolicUtils.arguments(expr)
-
-    if op == +
-        return sum(_expansion_cost(arg) for arg in args)
+    changed = Set{Int}()
+    for r in dirty
+        old = r.expr
+        r.expr, conv = _improve(r.expr, ctx)
+        r.state = conv ? :converged : :capped
+        isequal(old, r.expr) || push!(changed, ab.by_dummy[r.dummy])
     end
 
-    if op == *
-        return prod(_expansion_cost(arg) for arg in args)
-    end
-
-    if op == ^
-        base, exponent = args[1], args[2]
-        if exponent isa Int && exponent > 0
-            return (_expansion_cost(base))^exponent
-        else
-            return _expansion_cost(base)
+    # Sweep 2: only mark a region stable if it converged AND nothing it
+    # depends on (transitively) changed in this pass. Otherwise it converged
+    # against stale inner content and must be re-checked next round.
+    sub = _restore_all(ab)
+    tainted = Set{Int}()
+    for (i, r) in enumerate(ab.regions)
+        deps = _dummies_in(r.expr, ab)
+        if i in changed || any(d -> d in tainted, deps)
+            push!(tainted, i)
+        end
+        if r.state === :converged && !any(d -> d in tainted, deps)
+            push!(ctx.stable, sub[r.dummy])
         end
     end
+    return sub
 end
 
+function classify_residuals(residuals, ctx::SimplifyContext)
+    for (i, res) in enumerate(residuals)
+        class = classify_residual(res)
+        class === :contradiction && push!(ctx.warnings, "residual $i simplified to a contradiction")
+        class === :identity && a #figure out what to do with this
+    end
+end
+
+function classify_residual(res)
+    v = SymbolicUtils.unwrap_const(unwrap(res))
+    if v isa Number
+        return iszero(v) ? :identity : :contradiction
+    else
+        return :normal
+    end
+end
+
+#--------------------------------------------------------------------------
+# Phases (each: Vector of unwrapped residuals -> Vector of unwrapped residuals)
+#--------------------------------------------------------------------------
+
+function _attempt_expand_derivatives(expr, ctx::SimplifyContext)
+    ctx.opts.expand_derivatives == true || return expr
+    cand = Symbolics.unwrap(expand_derivatives(Symbolics.wrap(expr), simplify=true))
+    return _size(cand) >= ctx.opts.max_derivative_nodes ? expr : cand
+end
+
+function _algebraic_pass(res, ctx::SimplifyContext)
+    ctx.opts.expand_products == true || return res
+    ab = Abstraction()
+    roots = [_abstract_root!(r, ab) for r in res]
+
+    # Re-derive the ledger from the actual state every pass (no drift).
+    ctx.headroom = ctx.opts.max_nodes - sum(r -> _size(r.expr), ab.regions; init=0)
+
+    sub = _simplify_regions!(ab, ctx)
+    return [get(sub, root, root) for root in roots]   # leaves map to themselves
+end
+
+# Placeholder for your symbolic-rule stage. Rules act on whole restored
+# expressions; abstraction isn't needed here. Run it over unique shared
+# subexpressions with a memo dict if it gets slow.
+function _nonalgebraic_pass(res, ctx::SimplifyContext)
+    return res
+    # e.g. return [SymbolicUtils.Postwalk(ctx.rules)(r) for r in res]
+end
+
+
+#--------------------------------------------------------------------------
+# Top level
+#--------------------------------------------------------------------------
 function _simplify_branch(sys::DiffEqBranch, options::SimplificationOptions=SimplificationOptions())
-    eq_residuals = [_equation_residual(eq) for eq in sys.eqs]
-    #1 basic normalization
-    eq_residuals = [normalize_expr(res) for res in eq_residuals]
-    #2 expand derivatives
-    eq_residuals = [_attempt_expand_derivatives(res, options) for res in eq_residuals]
-    #3 distribute multiplication 
-    counter = Ref(1)
-    if options.expand_products==true
-        expr_to_dummy = Dict{Any,Any}()
-        dummy_to_expr = Dict{Any,Any}()
-        expansion_arr = [_algebraic_regions(unwrap(eq_res), dummy_to_expr, expr_to_dummy, counter) for eq_res in eq_residuals]
+    ctx = SimplifyContext(options)
+
+    # Unwrap once here, wrap once in rebuild_branch.
+    res = [Symbolics.unwrap(eq.lhs - eq.rhs) for eq in sys.eqs]
+    res = normalize_expr.(res)
+    res = [_attempt_expand_derivatives(r, ctx) for r in res]
+
+    # Outer fixpoint: phases feed each other until nothing changes.
+    # `seen` catches both fixpoints and cycles between phases.
+    seen = Set{Any}([res])
+    for _ in 1:options.max_rounds
+        new = _algebraic_pass(res, ctx)
+        new = _nonalgebraic_pass(new, ctx)
+        new = normalize_expr.(new)     # canonical order, so sharing is detected
+        new = [_attempt_expand_derivatives(r, ctx) for r in new]  # safe: no dummies here
+        classify_residuals(new)
+
+        new in seen && (res=new; break)
+        push!(seen, new)
+        res = new
+        ctx.headroom <= 0 && break
     end
 
+    _audit!(res, ctx)
+    return rebuild_branch(sys, Symbolics.wrap.(res), ctx.warnings)
 end
 
 """
@@ -249,7 +463,7 @@ separate derivation steps.
 """
 function simplify_system(sys::DiffEqSystem;
     options::SimplificationOptions=SimplificationOptions())
-    DiffEqSystem([
+    return DiffEqSystem([
         _simplify_branch(branch, options)
         for branch in sys.branches
     ])
@@ -307,7 +521,7 @@ end
 # helpers for group_coefficients
 function _is_target(e, unwrapped_dvs::Set, dv_ops)
     # If it is a leaf node, check if it matches any dvendent variable directly
-    if !SymbolicUtils.istree(e)
+    if !SymbolicUtils.iscall(e)
         return e in unwrapped_dvs
     end
 
@@ -335,7 +549,7 @@ function _find_targets!(e, unwrapped_dvs::Set, dv_ops, targets::Set)
     end
 
     # Otherwise, keep digging through the expression tree
-    if SymbolicUtils.istree(e)
+    if SymbolicUtils.iscall(e)
         for arg in SymbolicUtils.arguments(e)
             _find_targets!(arg, unwrapped_dvs, dv_ops, targets)
         end
@@ -343,7 +557,7 @@ function _find_targets!(e, unwrapped_dvs::Set, dv_ops, targets::Set)
 end
 
 function _diff_depth(e)
-    if !SymbolicUtils.istree(e)
+    if !SymbolicUtils.iscall(e)
         return 0
     end
 
