@@ -11,7 +11,7 @@ using DiffEqCAS
 eqs = [Differential(t)(u[1]) ~ a * Differential(x, 2)(u[1]) + b * u[2],
     Differential(t)(u[2]) ~ a * Differential(x, 2)(u[2]) + b * u[1]]
 bcs = [u[1] ~ 0, u[2] ~ 0]
-domain = SymbolicDomain([
+domain = SymDomain([
     t => [0 <= t, t <= 1],
     x => [-1 <= x, x <= 1],
     y => [-1 <= y, y <= 1],

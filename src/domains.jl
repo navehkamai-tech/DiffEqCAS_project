@@ -1,4 +1,3 @@
-
 #operator used for boundary conditions
 @register_symbolic Restrict(expr, domain)
 SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
@@ -37,8 +36,8 @@ end
 # Canonicalize domain keys while preserving either the supplied IV order or
 # the first-seen order of the domain keys when no IV order is available.
 function _canonicalize_domain_pairs(domain_pairs, ivs=nothing)
-    #the SymbolicDomain constructor canonicalizes on it's own
-    if domain_pairs isa SymbolicDomain
+    #the SymDomain constructor canonicalizes on it's own
+    if domain_pairs isa SymDomain
         return domain_pairs
     end
     domain_pairs = _domain_pairs(domain_pairs)
@@ -153,13 +152,13 @@ function add_constraints(
         push!(final_pairs, new_key => constraints)
         append!(final_variables, ordered_variables)
     end
-    return SymbolicDomain(final_pairs, final_variables)
+    return SymDomain(final_pairs, final_variables)
 end
 
 add_constraints(domain_pairs, new_constraints::Pair, ivs=nothing) =
     add_constraints(domain_pairs.pairs, [new_constraints], ivs)
 
-function restrict_domain(sys::DiffEqBranch, constraint::Symbolics.Num)
+function restrict_domain(sys::DiffEqLeaf, constraint::Symbolics.Num)
     sys.domain=add_constraints(sys.domain, constraint)
     vars = Symbolics.get_variables(constraint)
     push!(sys.history.steps, RestrictDomain(vars, constraint))
@@ -305,12 +304,12 @@ function constraints_to_domain(domain_pairs)
     return _pave_constraints(box, collected_constraints, all_vars, tolerance[])
 end
 
-function add_domain_paving(sys::DiffEqBranch)
+function add_domain_paving(sys::DiffEqLeaf)
     sys.domain_set === nothing && (sys.domain_set = constraints_to_domain(sys.domain))
     return sys.domain_set
 end
 
-function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqBranch, include_boundary::Bool=true)
+function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqLeaf, include_boundary::Bool=true)
     domain_data = constraints_to_domain(sys)
     domain_data === nothing && return false
     length(coord) == length(_domain_variables(sys.domain)) ||

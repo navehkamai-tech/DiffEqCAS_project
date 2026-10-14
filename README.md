@@ -16,7 +16,7 @@ Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingTo
 
 - **System and Branch Tracking**:
   - `DiffEqSystem` encapsulates equations, domain, and dependent/independent variables across potentially multiple branches of solutions.
-  - `DiffEqBranch` and `SymbolicRestriction` store branch-specific equations, domains, derivation history, and restrictions.
+  - `DiffEqLeaf` and `SymRestriction` store branch-specific equations, domains, derivation history, and restrictions.
   - `DerivationHistory` meticulously records transformations, variable changes, and simplifications that led to a specific branch.
 - **Transformations and Substitutions**: Easily perform coordinate transformations and variable substitutions on entire PDE systems. Both non-mutating (e.g., `change_ivs`) and in-place mutating (e.g., `change_ivs!`) versions are provided.
   - `change_ivs`: Transform independent variables (e.g., Cartesian to Polar coordinates).
@@ -33,7 +33,7 @@ Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingTo
 - **Units and Dimensional Analysis**:
   - Foundational support for unit tracking and nondimensionalization of PDE systems.
 - **Symbolic Domains**:
-  - `SymbolicDomain` stores inspectable variable/constraint pairs for symbolic rules and transformations.
+  - `SymDomain` stores inspectable variable/constraint pairs for symbolic rules and transformations.
   - Connected components are preserved as domain components; numerical interval boxes remain a separate derived cache.
 
 ## Main Exports
@@ -42,7 +42,7 @@ Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingTo
 using DiffEqCAS
 
 # Core Structures
-DiffEqSystem, DiffEqBranch, SymbolicDomain, SymbolicRestriction, domain_variables, domain_components, push_branch!, complete_branch!
+DiffEqSystem, DiffEqLeaf, SymDomain, SymRestriction, domain_variables, domain_components, push_branch!, complete_branch!
 DerivationStep, DerivationHistory, CoordTransform, ParamTransform, DepTransform, Factor, SimplificationStep
 
 # Transformation functions
@@ -61,7 +61,7 @@ Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 
 ## Structure
 
-- `src/base.jl`: Core structures for `DiffEqSystem`, `DiffEqBranch`, `SymbolicDomain`, and history tracking.
+- `src/base.jl`: Core structures for `DiffEqSystem`, `DiffEqLeaf`, `SymDomain`, and history tracking.
 - `src/utils.jl`, `src/domains.jl`: Foundational helpers and domain management.
 - `src/symbolic_rules.jl`: Core symbolic logic and rewrite rules.
 - `src/divisibility.jl`: Architectures for factor splitting and divisibility.

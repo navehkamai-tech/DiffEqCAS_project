@@ -1,14 +1,14 @@
 
 function _transform_restrictions(restrictions, transform)
-    SymbolicRestriction[
-        SymbolicRestriction(transform(restriction.residual), restriction.relation)
+    SymRestriction[
+        SymRestriction(transform(restriction.residual), restriction.relation)
         for restriction in restrictions
     ]
 end
 
 # Change parameters in place.  The return value is intentional: it supports
 # chaining while the `!` name makes the mutation explicit to callers.
-function change_parameters!(sys::DiffEqBranch, param_mapping::Dict)
+function change_parameters!(sys::DiffEqLeaf, param_mapping::Dict)
     # Pass 1: Raw substitution without the special rewriter
     substituted_eqs = [wrap(substitute(eq.lhs - eq.rhs, param_mapping)) for eq in sys.eqs]
     substituted_bcs_lhs = [wrap(substitute(bc.lhs, param_mapping)) for bc in sys.bcs]
@@ -147,7 +147,7 @@ function transform_domains(old_domain_pairs, iv_mapping::Dict, ivs=nothing)
     return _canonicalize_domain_pairs(new_domain_pairs, ivs)
 end
 
-function change_ivs!(sys::DiffEqBranch, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
+function change_ivs!(sys::DiffEqLeaf, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
     #make sure iv_mapping is from old variables to expressions containing new variables
     iv_exprs = Symbolics.Num[]
     for old_iv in sys.ivs
@@ -204,7 +204,7 @@ function change_ivs!(sys::DiffEqBranch, new_ivs::Vector{Symbolics.Num}, iv_mappi
 
     new_dvs = [Symbolics.wrap(custom_rewrite(unwrap(dv), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)) for dv in sys.dvs]
     step = CoordTransform(
-        iv_mapping, sys.ivs, new_ivs, J_inv)
+        iv_mapping, sys.ivs, new_ivs)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs,
         ps=params, bcs=transformed_bcs, domain=new_domains,
         restrictions=transformed_restrictions,
@@ -268,7 +268,7 @@ end
 
 
 
-function change_dvs!(sys::DiffEqBranch, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
+function change_dvs!(sys::DiffEqLeaf, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
     # 1. Align expressions with the existing dvendency order
     dv_exprs = Symbolics.Num[]
     for old_dv in sys.dvs
@@ -351,11 +351,11 @@ end
 
 # Keep the established names as mutating aliases.  Callers that need a
 # non-mutating transformation should explicitly copy the branch/system first.
-change_parameters(sys::DiffEqBranch, param_mapping::Dict) =
+change_parameters(sys::DiffEqLeaf, param_mapping::Dict) =
     change_parameters!(sys, param_mapping)
-change_ivs(sys::DiffEqBranch, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict) =
+change_ivs(sys::DiffEqLeaf, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict) =
     change_ivs!(sys, new_ivs, iv_mapping)
-change_dvs(sys::DiffEqBranch, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict) =
+change_dvs(sys::DiffEqLeaf, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict) =
     change_dvs!(sys, new_dvs, dv_mapping)
 change_parameters(sys::DiffEqSystem, param_mapping::Dict) =
     change_parameters!(sys, param_mapping)

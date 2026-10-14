@@ -20,7 +20,7 @@ struct ConstraintEvidence
     sign::SignState
 end
 
-function factor_evidence(factor, sys::DiffEqBranch)
+function factor_evidence(factor, sys::DiffEqLeaf)
     components = _evidence_components(sys, factor)
     key = (:constraint_evidence, Symbolics.unwrap(factor), components)
 
@@ -32,14 +32,14 @@ function factor_evidence(factor, sys::DiffEqBranch)
     return result
 end
 
-factor_sign(factor, sys::DiffEqBranch) = factor_evidence(factor, sys).sign
+factor_sign(factor, sys::DiffEqLeaf) = factor_evidence(factor, sys).sign
 
 factor_sign(factor, sys::DiffEqSystem) =
     length(sys.branches) == 1 ?
     factor_sign(factor, only(sys.branches)) :
     throw(ArgumentError("factor sign requires one selected branch"))
 
-factor_divisibility(factor, sys::DiffEqBranch) = factor_evidence(factor, sys).divisibility
+factor_divisibility(factor, sys::DiffEqLeaf) = factor_evidence(factor, sys).divisibility
 
 factor_divisibility(factor, sys::DiffEqSystem) =
     length(sys.branches) == 1 ?
@@ -47,7 +47,7 @@ factor_divisibility(factor, sys::DiffEqSystem) =
     throw(ArgumentError("factor divisibility requires one selected branch"))
 
 
-function _factor_evidence_uncached(factor, sys::DiffEqBranch, components)
+function _factor_evidence_uncached(factor, sys::DiffEqLeaf, components)
     if _contains_equal(sys.ps, factor)
         return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, undetermined)
     end
@@ -260,7 +260,7 @@ solver already handles linear inequalities and equalities, so asking it
 whether the affine zero set is feasible gives a conservative, reusable proof
 without factoring the expression again.
 """
-function _affine_factor_evidence(factor, components, sys::DiffEqBranch)
+function _affine_factor_evidence(factor, components, sys::DiffEqLeaf)
     factor_variables = Symbolics.get_variables(Symbolics.unwrap(factor))
     independent_variables = [iv for iv in sys.ivs if _contains_equal(factor_variables, iv)]
     length(independent_variables) == 1 || return nothing
@@ -312,7 +312,7 @@ gradient to tighten each component enclosure.  This is applicable to
 transcendental expressions as well as polynomials and must remain conservative
 when a derivative extension is unavailable.
 """
-function _centered_factor_divisibility(factor, components, sys::DiffEqBranch)
+function _centered_factor_divisibility(factor, components, sys::DiffEqLeaf)
     return nothing # PSEUDOCODE: replace with centered/mean-value forms.
 end
 
@@ -323,7 +323,7 @@ TODO (implementation): call Sturm root isolation only when `factor` is
 provably a polynomial in exactly one independent variable.  Treating
 `sin(x)`/`exp(x)` as polynomial atoms is not sufficient for this stage.
 """
-function _sturm_factor_divisibility(factor, components, sys::DiffEqBranch)
+function _sturm_factor_divisibility(factor, components, sys::DiffEqLeaf)
     return nothing # PSEUDOCODE: replace with certified Sturm isolation.
 end
 
@@ -333,7 +333,7 @@ Final general fallback.
 Formulates `domain ∧ factor relation 0` and evaluates feasibility via branch-and-prune paving. 
 An unresolved boundary box produces `undetermined`, never `divisible`.
 """
-function _paved_factor_evidence(factor, components, sys::DiffEqBranch)
+function _paved_factor_evidence(factor, components, sys::DiffEqLeaf)
     can_be_nonpositive = false
     can_be_nonnegative = false
     can_be_zero = false
@@ -375,7 +375,7 @@ function _evidence_from_literal(literal::Real)
     end
 end
 
-function _evidence_components(sys::DiffEqBranch, factor)
+function _evidence_components(sys::DiffEqLeaf, factor)
     factor_variables = Set(Symbolics.get_variables(Symbolics.unwrap(factor)))
     return [
         key => constraints for (key, constraints) in sys.domain
@@ -445,7 +445,7 @@ function _divisibility_cache_key(factor, components)
     (:divisibility, Symbolics.unwrap(factor), components)
 end
 
-function _has_depvar_or_diff(expr, sys::DiffEqBranch)
+function _has_depvar_or_diff(expr, sys::DiffEqLeaf)
     any(variable -> _contains_equal(sys.dvs, variable),
         Symbolics.get_variables(Symbolics.unwrap(expr))) && return true
 
@@ -456,7 +456,7 @@ function _has_depvar_or_diff(expr, sys::DiffEqBranch)
         SymbolicUtils.arguments(expression))
 end
 
-function _can_divide_by(expr::Symbolics.Num, sys::DiffEqBranch)
+function _can_divide_by(expr::Symbolics.Num, sys::DiffEqLeaf)
     _contains_equal(sys.dvs, expr) && return false
     _has_depvar_or_diff(expr, sys) && return false
 

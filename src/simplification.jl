@@ -32,7 +32,7 @@ Base.@kwdef struct SimplificationOptions
         return new(msp, mr, mn, mdn, ed, ep, rules)
     end
 end
-struct SimplificationStep <: DerivationStep
+struct Simplification <: DerivationStep
     options::SimplificationOptions
 end
 

@@ -6,7 +6,7 @@ using StaticArrays
 
 @variables x y z
 
-domain = SymbolicDomain([
+domain = SymDomain([
     x => [0 < x, x < 1],
     (y, z) => [y^2 + z^2 < 1],
 ])
@@ -17,11 +17,11 @@ domain = SymbolicDomain([
 @test isequal(domain[2].first, (y, z))
 
 sys = DiffEqSystem([], [], domain, [x, y, z], [])
-@test sys.domain isa SymbolicDomain
+@test sys.domain isa SymDomain
 @test all(isequal.(collect(sys.domain), collect(domain)))
 
 sys.domain_set = (IntervalBoxes.IntervalBox[], IntervalBoxes.IntervalBox[])
-sys.domain = SymbolicDomain([x => [x > 0]])
+sys.domain = SymDomain([x => [x > 0]])
 @test sys.domain_set === nothing
 
 @test DiffEqCAS.constraints_satisfiable([x > 0], [x => [x > 0]], true)

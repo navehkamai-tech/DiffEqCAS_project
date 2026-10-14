@@ -144,7 +144,7 @@ is_positive(x) = get_sign(x)==positive
 is_negative(x) = get_sign(x)==negative
 is_divisible(x) = nothing #? needs to be filled in
 is_integer(x) = x isa Integer
-is_domain(x) = x isa SymbolicDomain
+is_domain(x) = x isa SymDomain
 
 @variables π e #what else?...
 

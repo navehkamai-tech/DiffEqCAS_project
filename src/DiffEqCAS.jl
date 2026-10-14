@@ -7,11 +7,11 @@ the goal is for it to be quite general and be able to handle all systems of any 
 in addition my aim is to have leave the possibility of numeric computation open for the future, so design choices must be made with that in mind
 =#
 
-using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unitful, IntervalArithmetic, IntervalBoxes, StaticArrays, LRUCache, DataStructures, TermInterface, Combinatorics
+using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unitful, IntervalArithmetic, IntervalBoxes, StaticArrays, LRUCache, DataStructures, TermInterface, Base.MathConstants
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute
 import SymbolicUtils: maketerm, @rule, @acrule
 import Base.MathConstants as MC
-export SymbolicDomain, SymbolicRestriction, domain_variables, domain_components, DiffEqSystem, DiffEqBranch, push_branch!, complete_branch!, DerivationStep, DerivationHistory, CoordTransform, ParamTransform, DepTransform, Factor, change_dvs!, change_ivs!, change_parameters!, change_dvs, change_ivs, change_parameters, group_coefficients, common_divisors, factor_divisibility, custom_rewrite, get_base_op, get_sign, Dirac, Heaviside, Restrict, SPECIAL_REWRITER
+export SymDomain, SymRestriction, domain_variables, domain_components, DiffEqSystem, DiffEqLeaf, push_branch!, complete_branch!, TransformStep, TransformChain, CoordTransform, ParamTransform, DepTransform, Factor, change_dvs!, change_ivs!, change_parameters!, change_dvs, change_ivs, change_parameters, group_coefficients, common_divisors, factor_divisibility, custom_rewrite, get_base_op, get_sign, Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 export SimplificationStep, simplify_system
 
 # 1. Foundational helpers
