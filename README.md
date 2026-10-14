@@ -16,7 +16,7 @@ Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingTo
 
 - **System and Branch Tracking**:
   - `DiffEqSystem` encapsulates equations, domain, and dependent/independent variables across potentially multiple branches of solutions.
-  - `DiffEqLeaf` and `SymRestriction` store branch-specific equations, domains, derivation history, and restrictions.
+  - `DESys` and `SymRelation` store branch-specific equations, domains, derivation history, and restrictions.
   - `DerivationHistory` meticulously records transformations, variable changes, and simplifications that led to a specific branch.
 - **Transformations and Substitutions**: Easily perform coordinate transformations and variable substitutions on entire PDE systems. Both non-mutating (e.g., `change_ivs`) and in-place mutating (e.g., `change_ivs!`) versions are provided.
   - `change_ivs`: Transform independent variables (e.g., Cartesian to Polar coordinates).
@@ -42,8 +42,8 @@ Built on top of the robust Julia symbolic ecosystem (`Symbolics.jl`, `ModelingTo
 using DiffEqCAS
 
 # Core Structures
-DiffEqSystem, DiffEqLeaf, SymDomain, SymRestriction, domain_variables, domain_components, push_branch!, complete_branch!
-DerivationStep, DerivationHistory, CoordTransform, ParamTransform, DepTransform, Factor, SimplificationStep
+DiffEqSystem, DESys, SymDomain, SymRelation, domain_variables, domain_components, push_branch!, complete_branch!
+DerivationStep, DerivationHistory, IvTransform, PsTransform, DvTransform, Factor, SimplificationStep
 
 # Transformation functions
 change_dvs!, change_ivs!, change_parameters!
@@ -61,7 +61,7 @@ Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 
 ## Structure
 
-- `src/base.jl`: Core structures for `DiffEqSystem`, `DiffEqLeaf`, `SymDomain`, and history tracking.
+- `src/base.jl`: Core structures for `DiffEqSystem`, `DESys`, `SymDomain`, and history tracking.
 - `src/utils.jl`, `src/domains.jl`: Foundational helpers and domain management.
 - `src/symbolic_rules.jl`: Core symbolic logic and rewrite rules.
 - `src/divisibility.jl`: Architectures for factor splitting and divisibility.

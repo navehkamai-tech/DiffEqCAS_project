@@ -11,7 +11,7 @@ using Symbolics, LinearAlgebra, SymbolicUtils, DomainSets, ModelingToolkit, Unit
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute
 import SymbolicUtils: maketerm, @rule, @acrule
 import Base.MathConstants as MC
-export SymDomain, SymRestriction, domain_variables, domain_components, DiffEqSystem, DiffEqLeaf, push_branch!, complete_branch!, TransformStep, TransformChain, CoordTransform, ParamTransform, DepTransform, Factor, change_dvs!, change_ivs!, change_parameters!, change_dvs, change_ivs, change_parameters, group_coefficients, common_divisors, factor_divisibility, custom_rewrite, get_base_op, get_sign, Dirac, Heaviside, Restrict, SPECIAL_REWRITER
+export SymDomain, SymRelation, domain_variables, domain_components, DiffEqSystem, DESys, push_branch!, complete_branch!, XStep, XChain, IvTransform, PsTransform, DvTransform, Factor, change_dvs!, change_ivs!, change_parameters!, change_dvs, change_ivs, change_parameters, group_coefficients, common_divisors, factor_divisibility, custom_rewrite, get_base_op, get_sign, Dirac, Heaviside, Restrict, SPECIAL_REWRITER
 export SimplificationStep, simplify_system
 
 # 1. Foundational helpers

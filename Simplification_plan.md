@@ -2,7 +2,7 @@
 
 This document is the implementation template for simplification in
 `DiffEqCAS`. It is intentionally organized around the existing
-`DiffEqSystem`/`DiffEqLeaf` architecture rather than around independent
+`DiffEqSystem`/`DESys` architecture rather than around independent
 expression-processing utilities.
 
 The planned simplifier has two architectural levels:
@@ -37,7 +37,7 @@ simplify_system(sys::DiffEqSystem; options=SimplificationOptions())
 ```
 
 It accepts one system and returns one new `DiffEqSystem`. A system may contain
-multiple `DiffEqLeaf` values because branches represent a union of solution
+multiple `DESys` values because branches represent a union of solution
 sets, but the simplifier does not create a second independent system context.
 
 ### Task block: architecture and state
@@ -94,14 +94,14 @@ sets, but the simplifier does not create a second independent system context.
 Simplification should use that model instead of introducing a separate
 simplification context that duplicates system state. The system-level function
 coordinates the run, while branch-local helpers receive a selected
-`DiffEqLeaf`.
+`DESys`.
 
 The simplifier should not mutate the caller's system. It should construct
 transformed branches, preserve branch metadata, and return a new
 `DiffEqSystem`. This matches the current `_with_simplified_expressions` and
 `_simplify_one_system` direction.
 
-### 1.2 `DiffEqLeaf` is the unit of assumptions and history
+### 1.2 `DESys` is the unit of assumptions and history
 
 Each branch carries:
 
@@ -131,7 +131,7 @@ deduplication state that are execution details rather than input data.
 
 Because one `DiffEqSystem` can contain several initial branches, the snapshot
 should contain one immutable record per initial branch. It does not need to
-reuse `DiffEqLeaf`; its job is to preserve input values, not to participate
+reuse `DESys`; its job is to preserve input values, not to participate
 in branch processing:
 
 ```julia
@@ -145,16 +145,16 @@ Each element of `branches` should be constructed from immutable containers
 metadata). The implementation can use an internal immutable named tuple with
 the fields `identifier`, `ivs`, `dvs`, `ps`, `eqs`, `bcs`, `original_domain`,
 `restrictions`, and `name`; it should not store mutable
-`DiffEqLeaf` objects inside the root.
+`DESys` objects inside the root.
 
 Conceptually, the `DiffEqSystem` proposal therefore becomes (preserving the
 existing type parameters in the implementation):
 
 ```julia
 mutable struct DiffEqSystem
-    branches::Vector{DiffEqLeaf}
-    pending::Stack{DiffEqLeaf}
-    completed::Vector{DiffEqLeaf}
+    branches::Vector{DESys}
+    pending::Stack{DESys}
+    completed::Vector{DESys}
     seen::Set{UInt}
     root::SimplificationRoot
 end
@@ -330,7 +330,7 @@ Do not store both an original domain and a second copy of the fully intersected
 domain. Instead, use:
 
 ```julia
-mutable struct DiffEqLeaf
+mutable struct DESys
     # existing fields
     original_domain::SymDomain
     domain_restrictions::Vector{NamedTuple{(:condition, :source),Tuple{Any,Symbol}}}
@@ -550,7 +550,7 @@ subexpressions remain atoms or are left untouched.
 ### 2.4 Which proposed structs persist
 
 The design intentionally keeps the data model small. Persistent state belongs
-in `DiffEqSystem`, `DiffEqLeaf`, and `DerivationHistory`; the following
+in `DiffEqSystem`, `DESys`, and `DerivationHistory`; the following
 additional types have distinct roles:
 
 | Type                  | Role                                                           | Why it is not another existing field                                   |
@@ -567,9 +567,9 @@ additional types have distinct roles:
 Do not add separate persistent structs for generic rewrite candidates,
 diagnostics, solution pieces, guards, domain pieces, or complexity contexts.
 Rewrite candidates and diagnostics are pass-local values. Independent-variable
-conditions use `DiffEqLeaf.original_domain` plus its
+conditions use `DESys.original_domain` plus its
 `domain_restrictions`; dependent-variable conditions use
-`DiffEqLeaf.restrictions`. Resource limits and policy use
+`DESys.restrictions`. Resource limits and policy use
 `SimplificationOptions`. This prevents several objects from representing the
 same concept under different names.
 
@@ -883,7 +883,7 @@ end
 ```
 
 `_run_unconditional_branch_stages` calls this helper for every equation and
-boundary condition, reconstructs a `DiffEqLeaf` with the existing metadata,
+boundary condition, reconstructs a `DESys` with the existing metadata,
 and returns diagnostics to the integrated branch pass. It does not append
 history by itself; the outer `simplify_system` call appends one
 `SimplificationStep(options)` when the complete requested run changes the
@@ -938,7 +938,7 @@ struct ProofFact
 end
 ```
 
-`AssumptionState` is not stored in `DiffEqLeaf` and is not a second system.
+`AssumptionState` is not stored in `DESys` and is not a second system.
 It is derived from one branch at the start of a branch pass and discarded or
 merged into branch restrictions when the pass finishes. This keeps persistent
 state in the existing branch architecture while allowing expensive proof
@@ -952,7 +952,7 @@ and later stronger polynomial or constraint methods.
 
 When a recognized operation is undefined outside a part of the independent
 variable domain, add a restriction to the current branch. Do not create a
-second `DiffEqLeaf` or a second fully intersected domain field for the
+second `DESys` or a second fully intersected domain field for the
 discarded region. It is not a second solution family of the original equation.
 
 ```julia
@@ -1098,7 +1098,7 @@ function _simplify_branch(branch, options)
     current = [branch]
 
     for _ in 1:options.max_passes
-        next = DiffEqLeaf[]
+        next = DESys[]
         for current_branch in current
             assumptions = _assumption_state(current_branch)
             normalized = _run_unconditional_branch_stages(
@@ -1444,14 +1444,14 @@ history or diagnostics if that explanation is needed.
 2. Add immutable `SimplificationRoot` snapshots to `DiffEqSystem` construction
    and copying before transformations are implemented.
 3. Implement residual canonicalization and identity/contradiction
-   classification while preserving `DiffEqLeaf` metadata.
+   classification while preserving `DESys` metadata.
 4. Refactor `group_coefficients` into a safe collector with differential-term
    classification and nonlinear atom preservation.
 5. Expand `SimplificationOptions` with shared budgets and branch/system policy
    switches;
    record the same options in `SimplificationStep`.
 6. Implement valid-domain restriction through
-   `DiffEqLeaf.domain_restrictions` without independent-variable branch
+   `DESys.domain_restrictions` without independent-variable branch
    creation.
 7. Add stable canonical fingerprints and ensure fixed-point checks use them.
 8. Turn divisibility results into proof facts and implement certified

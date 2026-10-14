@@ -38,8 +38,8 @@ dependent_result = simplify_system(dependent_factor)
     dependent_result.branches[1].eqs[1].lhs - u^2)) == "0"
 
 duplicate_union = DiffEqSystem()
-@test push_branch!(duplicate_union, DiffEqLeaf(
+@test push_branch!(duplicate_union, DESys(
     [u ~ 0], Symbolics.Equation[], [x => [x > 0]], [x], [u]))
-@test push_branch!(duplicate_union, DiffEqLeaf(
+@test push_branch!(duplicate_union, DESys(
     [u ~ 0], Symbolics.Equation[], [x => [x > 0]], [x], [u]))
 @test length(duplicate_union.pending) == 2

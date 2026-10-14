@@ -8,7 +8,7 @@ end
 
 # Change parameters in place.  The return value is intentional: it supports
 # chaining while the `!` name makes the mutation explicit to callers.
-function change_parameters!(sys::DiffEqLeaf, param_mapping::Dict)
+function change_parameters!(sys::DESys, param_mapping::Dict)
     # Pass 1: Raw substitution without the special rewriter
     substituted_eqs = [wrap(substitute(eq.lhs - eq.rhs, param_mapping)) for eq in sys.eqs]
     substituted_bcs_lhs = [wrap(substitute(bc.lhs, param_mapping)) for bc in sys.bcs]
@@ -36,11 +36,11 @@ function change_parameters!(sys::DiffEqLeaf, param_mapping::Dict)
     transformed_restrictions = _transform_restrictions(
         sys.restrictions,
         residual -> simplify(SPECIAL_REWRITER(substitute(residual, param_mapping))))
-    # *need to add a helper function for getting the new domains
-    step = ParamTransform(
+    new_domain = transform_domain_parameters(sys.domain, param_mapping)
+    step = PsTransform(
         param_mapping, sys.ps, new_params)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs,
-        ps=new_params, bcs=transformed_bcs, domain=sys.domain,
+        ps=new_params, bcs=transformed_bcs, domain=new_domain,
         restrictions=transformed_restrictions,
         history=append_derivation(sys.history, step))
 end
@@ -99,26 +99,23 @@ function custom_rewrite(expr, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, c
     return res
 end
 
-function _mapped_domain_variables(var_tuple, new_constraints, iv_mapping)
+# ---------------------------------------------------------------------------
+# Domain rewriting
+#
+# A transformation rewrites the constraints of the factors it touches; the
+# factors it does not touch are left alone.  The result is rebuilt from the
+# rewritten constraints (a coordinate change can merge or split factors), and
+# then `share_factors` hands every factor whose variables, Ids and constraint
+# content came out unchanged its old factor object back, paving included.  A
+# factor that was really rewritten therefore starts with no paving, and an
+# untouched one keeps the one it had.  Nothing here ever copies a paving by hand.
+# ---------------------------------------------------------------------------
+
+# Variables a factor's variables turn into under `mapping`.
+function _mapped_factor_variables(factor::DomBlock, mapping)
     variables = Any[]
-
-    # Variables in transformed constraints are the coordinates that actually
-    # describe this domain component. This allows coupled constraints to
-    # collapse when a coordinate becomes redundant, e.g. x^2 + y^2 < 1
-    # becoming r^2 < 1 under polar coordinates.
-    for constraint in new_constraints
-        for variable in Symbolics.get_variables(Symbolics.unwrap(constraint))
-            push!(variables, variable)
-        end
-    end
-
-    # A valid non-degenerate coordinate change should leave a non-constant
-    # transformed constraint. Keep the mapped key as a defensive fallback for
-    # variable-free constraints until degenerate mappings are supported.
-    isempty(variables) || return _ordered_unique(variables)
-
-    for variable in var_tuple
-        mapped = haskey(iv_mapping, variable) ? substitute(variable, iv_mapping) : variable
+    for variable in factor.variables
+        mapped = haskey(mapping, variable) ? substitute(variable, mapping) : variable
         for mapped_variable in Symbolics.get_variables(Symbolics.unwrap(mapped))
             push!(variables, mapped_variable)
         end
@@ -126,28 +123,59 @@ function _mapped_domain_variables(var_tuple, new_constraints, iv_mapping)
     return _ordered_unique(variables)
 end
 
-# Transform domain constraints and canonicalize their keys in the target IV order.
-function transform_domains(old_domain_pairs, iv_mapping::Dict, ivs=nothing)
-    old_domain_pairs = _domain_pairs(old_domain_pairs)
-    new_domain_pairs = Pair[]
+"""
+    _rebuild_domain(domain, touched, rewrite, mapped_variables)
 
-    for (old_vars, constraints) in old_domain_pairs
-        var_tuple = _key_variables(old_vars)
+* `touched(factor)`: does the transformation affect this factor?
+* `rewrite(relation)`: the transformed `SymRelation` (Ids are preserved).
+* `mapped_variables(factor)`: the variables of a touched factor after the
+  transformation.  Only used when the rewritten constraints mention no variable
+  at all (an unconstrained factor, or a degenerate mapping): there is then
+  nothing to regroup by, so the mapped variables become the factor's key.
+  Otherwise factors are re-derived from the rewritten constraints, which lets
+  coupled constraints collapse when a coordinate becomes redundant, e.g.
+  x^2 + y^2 < 1 becoming r^2 < 1 under polar coordinates.
+"""
+function _rebuild_domain(domain::SymDomain, touched, rewrite, mapped_variables)
+    declared = Pair[]
+    constraints = DomConstraint[]
+    for factor in domain.factors
+        is_touched = touched(factor)
+        members = DomConstraint[constraints_of(domain, factor)...]
+        is_touched && (members = DomConstraint[DomConstraint(c.id, rewrite(c.relation)) for c in members])
 
-        if any(haskey(iv_mapping, variable) for variable in var_tuple)
-            new_constraints = [simplify(substitute(c, iv_mapping)) for c in constraints]
-            found_vars = _mapped_domain_variables(var_tuple, new_constraints, iv_mapping)
-            new_key = length(found_vars) == 1 ? found_vars[1] : Tuple(found_vars)
-            push!(new_domain_pairs, new_key => new_constraints)
+        if any(c -> !isempty(constraint_variables(c)), members)
+            append!(constraints, members)
         else
-            push!(new_domain_pairs, old_vars => constraints)
+            variables = is_touched ? mapped_variables(factor) : collect(factor.variables)
+            push!(declared, (length(variables) == 1 ? only(variables) : Tuple(variables)) => members)
         end
     end
-
-    return _canonicalize_domain_pairs(new_domain_pairs, ivs)
+    rebuilt = add_constraints(SymDomain(declared), constraints)
+    return share_factors(rebuilt, domain)
 end
 
-function change_ivs!(sys::DiffEqLeaf, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
+# Transform domain constraints under an independent-variable change.  Only
+# factors containing a mapped variable are rewritten.  `ivs` is accepted for
+# compatibility; the stored form is canonical and does not depend on it.
+function transform_domains(domain::SymDomain, iv_mapping::Dict, ivs=nothing)
+    _rebuild_domain(
+        domain,
+        factor -> any(variable -> haskey(iv_mapping, variable), factor.variables),
+        relation -> SymRelation(simplify(substitute(relation.residual, iv_mapping)), relation.relation),
+        factor -> _mapped_factor_variables(factor, iv_mapping))
+end
+
+# Same for a parameter change: constraints such as `x < a` change when `a` does.
+function transform_domain_parameters(domain::SymDomain, param_mapping::Dict)
+    _rebuild_domain(
+        domain,
+        factor -> any(variable -> haskey(param_mapping, variable), factor.variables),
+        relation -> SymRelation(simplify(substitute(relation.residual, param_mapping)), relation.relation),
+        factor -> _mapped_factor_variables(factor, param_mapping))
+end
+
+function change_ivs!(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
     #make sure iv_mapping is from old variables to expressions containing new variables
     iv_exprs = Symbolics.Num[]
     for old_iv in sys.ivs
@@ -203,7 +231,7 @@ function change_ivs!(sys::DiffEqLeaf, new_ivs::Vector{Symbolics.Num}, iv_mapping
     new_domains = transform_domains(sys.domain, iv_mapping, final_ivs)
 
     new_dvs = [Symbolics.wrap(custom_rewrite(unwrap(dv), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)) for dv in sys.dvs]
-    step = CoordTransform(
+    step = IvTransform(
         iv_mapping, sys.ivs, new_ivs)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs,
         ps=params, bcs=transformed_bcs, domain=new_domains,
@@ -268,7 +296,7 @@ end
 
 
 
-function change_dvs!(sys::DiffEqLeaf, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
+function change_dvs!(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
     # 1. Align expressions with the existing dvendency order
     dv_exprs = Symbolics.Num[]
     for old_dv in sys.dvs
@@ -321,7 +349,7 @@ function change_dvs!(sys::DiffEqLeaf, new_dvs::Vector{Symbolics.Num}, dv_mapping
 
     # Passing sys.params assuming you want to retain the original params block manually
     mapping = Dict(old_dvs .=> dv_exprs)
-    step = DepTransform(mapping, sys.dvs, final_dvs)
+    step = DvTransform(mapping, sys.dvs, final_dvs)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs,
         ps=params, bcs=transformed_bcs, domain=sys.domain,
         restrictions=transformed_restrictions,
@@ -351,11 +379,11 @@ end
 
 # Keep the established names as mutating aliases.  Callers that need a
 # non-mutating transformation should explicitly copy the branch/system first.
-change_parameters(sys::DiffEqLeaf, param_mapping::Dict) =
+change_parameters(sys::DESys, param_mapping::Dict) =
     change_parameters!(sys, param_mapping)
-change_ivs(sys::DiffEqLeaf, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict) =
+change_ivs(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict) =
     change_ivs!(sys, new_ivs, iv_mapping)
-change_dvs(sys::DiffEqLeaf, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict) =
+change_dvs(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict) =
     change_dvs!(sys, new_dvs, dv_mapping)
 change_parameters(sys::DiffEqSystem, param_mapping::Dict) =
     change_parameters!(sys, param_mapping)

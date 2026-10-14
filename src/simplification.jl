@@ -41,8 +41,8 @@ Build a system from transformed residual expressions while preserving all
 system metadata.  Boundary conditions are normalized by the same expression
 normalizer but are never subjected to equation splitting in this pass.
 """
-function _with_simplified_expressions(sys::DiffEqBranch, eqs, bcs, restrictions)
-    DiffEqBranch(
+function _with_simplified_expressions(sys::DESys, eqs, bcs, restrictions)
+    DESys(
         eqs=eqs,
         ivs=sys.ivs,
         dvs=sys.dvs,
@@ -67,7 +67,7 @@ TODO: preserve factor multiplicities and provenance in a FactorCandidate
 record.  The current hook uses the existing candidate API and cancels one
 factor at a time; a failed or unresolved candidate is left untouched.
 """
-function _cancel_certified_residual(residual, sys::DiffEqBranch)
+function _cancel_certified_residual(residual, sys::DESys)
     current = wrap(residual)
     cancelled = Any[]
     for candidate in common_divisors(current, sys)
@@ -81,7 +81,7 @@ function _cancel_certified_residual(residual, sys::DiffEqBranch)
     current, cancelled
 end
 
-function _cancel_system(sys::DiffEqBranch)
+function _cancel_system(sys::DESys)
     eqs = Symbolics.Equation[]
     details = Any[]
     for eq in sys.eqs
@@ -103,7 +103,7 @@ The future Nemo bridge should map dependent variables and derivative
 expressions to reversible algebraic atoms, factor only polynomial residuals,
 and expand the result again to verify equivalence.
 """
-function _factorization_stage(sys::DiffEqBranch)
+function _factorization_stage(sys::DESys)
     # TODO: For each residual:
     #   1. Select differential expressions and dependent variables as atoms.
     #   2. Build a reversible Symbolics <-> Nemo polynomial map.
@@ -118,19 +118,19 @@ function _factorization_stage(sys::DiffEqBranch)
     sys, :not_implemented
 end
 
-function _factorization_atoms(residual, sys::DiffEqBranch)
+function _factorization_atoms(residual, sys::DESys)
     # TODO: Return the reversible atom list used by the Nemo polynomial map.
     # Differential expressions and dependent-variable expressions must remain
     # distinguishable when the polynomial is reconstructed.
     nothing
 end
 
-function _factorization_partition(sys::DiffEqBranch, factors)
+function _factorization_partition(sys::DESys, factors)
     # TODO: Normalize factors, collapse repeated powers, and create one
     # disjoint child per distinct factor.  For factor i, inherit all parent
     # restrictions and add nonzero restrictions for factors 1:i-1; the child
     # equation is factor i == 0.
-    DiffEqBranch[]
+    DESys[]
 end
 
 mutable struct Region
@@ -398,7 +398,7 @@ function _nonalgebraic_pass(res, ctx::SimplifyContext)
     # e.g. return [SymbolicUtils.Postwalk(ctx.rules)(r) for r in res]
 end
 
-function rebuild_branch(sys::DiffEqBranch, eqs, warnings, bcs, restrictions)
+function rebuild_branch(sys::DESys, eqs, warnings, bcs, restrictions)
     restrictions = [_normalize_restriction(restriction) for restriction in sys.restrictions]
     return _with_simplified_expressions(sys, eqs, sys.bcs, restrictions), warnings
 end
@@ -406,7 +406,7 @@ end
 #--------------------------------------------------------------------------
 # Top level
 #--------------------------------------------------------------------------
-function _simplify_branch_eqs(sys::DiffEqBranch, options::SimplificationOptions=SimplificationOptions())
+function _simplify_branch_eqs(sys::DESys, options::SimplificationOptions=SimplificationOptions())
     ctx = SimplifyContext(options)
 
     # Unwrap once here, wrap once in rebuild_branch.
@@ -467,7 +467,7 @@ TODO: replace the vectors with multiplicity-aware FactorCandidate records.
 The current ordered intersection preserves duplicate factors conservatively by
 removing one matching occurrence at a time.
 """
-function common_divisors(expr, sys::DiffEqBranch)
+function common_divisors(expr, sys::DESys)
     expr === nothing && throw(ArgumentError("input expression cannot be empty"))
 
     normalized = unwrap(simplify(expand(expand_derivatives(wrap(expr)))))

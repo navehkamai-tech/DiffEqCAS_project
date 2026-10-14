@@ -20,26 +20,63 @@ struct ConstraintEvidence
     sign::SignState
 end
 
-function factor_evidence(factor, sys::DiffEqLeaf)
-    components = _evidence_components(sys, factor)
-    key = (:constraint_evidence, Symbolics.unwrap(factor), components)
+# NOTE on names: a "factor" in this file is a multiplicative factor of an
+# equation.  A `DomBlock` is a factor of the *domain*; the variables below
+# named `dfactor` / fields named `factors` of `EvidenceDomain` are those.
+
+"""
+    EvidenceDomain
+
+The part of a leaf's domain that bears on one expression: only the domain
+factors that share a variable with it.  Every other factor is irrelevant to the
+expression and is never looked at.
+
+`key` identifies those factors by content (variables and constraint
+expressions; no Ids, no cached pavings).  Cache entries keyed on it stay valid
+exactly as long as the relevant constraints are unchanged and need no explicit
+invalidation.  The sub-domain itself is built on demand, since most queries are
+settled by interval arithmetic before any feasibility check.
+"""
+mutable struct EvidenceDomain
+    source::SymDomain
+    factors::Vector{DomBlock}
+    key::Any
+    sub::Union{Nothing,SymDomain}
+end
+
+function _evidence_domain(sys::DESys, expr)
+    expr_variables = Symbolics.get_variables(Symbolics.unwrap(expr))
+    domain = sys.domain
+    relevant = DomBlock[
+        f for f in domain.factors if any(v -> _contains_equal(f.variables, v), expr_variables)]
+    return EvidenceDomain(domain, relevant, factors_content_key(domain, relevant), nothing)
+end
+
+function _ctx_domain!(ctx::EvidenceDomain)
+    ctx.sub === nothing && (ctx.sub = subdomain(ctx.source, ctx.factors))
+    return ctx.sub
+end
+
+function factor_evidence(factor, sys::DESys)
+    ctx = _evidence_domain(sys, factor)
+    key = (:constraint_evidence, Symbolics.unwrap(factor), ctx.key)
 
     haskey(cache, key) && return cache[key]
 
-    result = _factor_evidence_uncached(factor, sys, components)
+    result = _factor_evidence_uncached(factor, sys, ctx)
     cache[key] = result
 
     return result
 end
 
-factor_sign(factor, sys::DiffEqLeaf) = factor_evidence(factor, sys).sign
+factor_sign(factor, sys::DESys) = factor_evidence(factor, sys).sign
 
 factor_sign(factor, sys::DiffEqSystem) =
     length(sys.branches) == 1 ?
     factor_sign(factor, only(sys.branches)) :
     throw(ArgumentError("factor sign requires one selected branch"))
 
-factor_divisibility(factor, sys::DiffEqLeaf) = factor_evidence(factor, sys).divisibility
+factor_divisibility(factor, sys::DESys) = factor_evidence(factor, sys).divisibility
 
 factor_divisibility(factor, sys::DiffEqSystem) =
     length(sys.branches) == 1 ?
@@ -47,18 +84,18 @@ factor_divisibility(factor, sys::DiffEqSystem) =
     throw(ArgumentError("factor divisibility requires one selected branch"))
 
 
-function _factor_evidence_uncached(factor, sys::DiffEqLeaf, components)
+function _factor_evidence_uncached(factor, sys::DESys, ctx::EvidenceDomain)
     if _contains_equal(sys.ps, factor)
         return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, undetermined)
     end
 
     # Stage 1: Prime the global cache with exact bounds for independent variables
-    _prime_domain_bounds!(components)
+    _prime_domain_bounds!(ctx)
 
     # Stage 2: Fast structural and interval arithmetic
-    best_evidence = _infer_tree(factor, components)
+    best_evidence = _infer_tree(factor, ctx)
 
-    if best_evidence.divisibility !== undetermined || isempty(components)
+    if best_evidence.divisibility !== undetermined || isempty(ctx.factors)
         return best_evidence
     end
 
@@ -68,7 +105,7 @@ function _factor_evidence_uncached(factor, sys::DiffEqLeaf, components)
         _sturm_factor_evidence,
         _paved_factor_evidence,
     )
-        result = stage(factor, components, sys)
+        result = stage(factor, ctx, sys)
 
         if result !== nothing
             new_bound = best_evidence.bound ∩ result.bound
@@ -90,28 +127,25 @@ end
 # beginning of the pipeline - always called first
 
 """
-Natural interval evaluation over each domain component.
+Natural interval evaluation over each relevant domain factor.
 
-obtain the component boxes without invoking paving,
+obtain the factor boxes without invoking paving,
 evaluate `factor` with `_domain_interval_value` (extended for all supported
 registered functions), and return:
 * `divisible` only when every feasible box excludes zero;
 * `haszero` only with a certified feasible zero;
 * leave `undetermined` when interval dependency leaves the result unresolved.
 """
-function _prime_domain_bounds!(components)
-    for component in components
-        key, constraints = component
-        ivs = collect(_key_variables(key))
+function _prime_domain_bounds!(ctx::EvidenceDomain)
+    for dfactor in ctx.factors
+        ivs = collect(dfactor.variables)
         bounds = Dict(iv => IntervalArithmetic.Interval(-Inf, Inf) for iv in ivs)
 
-        for constraint in constraints
-            relation = Symbolics.unwrap(constraint)
-            op = Symbolics.operation(relation)
-            op in ((<), (≤), (>), (≥), (==)) || continue
+        for constraint in constraints_of(ctx.source, dfactor)
+            op = _get_relation(constraint.relation)
+            op === (!=) && continue
 
-            lhs, rhs = SymbolicUtils.arguments(relation)
-            expr = lhs - rhs
+            expr = Symbolics.unwrap(constraint.relation.residual)
             expr_vars = Symbolics.get_variables(expr)
             constraint_ivs = [iv for iv in ivs if _contains_equal(expr_vars, iv)]
 
@@ -124,7 +158,7 @@ function _prime_domain_bounds!(components)
 
         # Inject the bounds into the global cache to prime _infer_tree
         for (iv, bound) in bounds
-            cache_key = (:constraint_evidence, Symbolics.unwrap(iv), components)
+            cache_key = (:constraint_evidence, Symbolics.unwrap(iv), ctx.key)
             sign_state = bound.hi < 0 ? negative : (bound.lo > 0 ? positive : (bound.lo == 0 && bound.hi == 0 ? iszero : undetermined))
             divis_state = (sign_state in (positive, negative) || 0 ∉ bound) ? divisible : (sign_state === iszero ? haszero : undetermined)
             cache[cache_key] = ConstraintEvidence(bound, divis_state, sign_state)
@@ -132,12 +166,12 @@ function _prime_domain_bounds!(components)
     end
 end
 
-function _infer_tree(expr, components)
+function _infer_tree(expr, ctx::EvidenceDomain)
     expr = simplify(expr)
     expr==0 && return ConstraintEvidence(interval(0, 0), haszero, iszero)
 
     # 1. Check existing cache
-    key = (:constraint_evidence, Symbolics.unwrap(expr), components)
+    key = (:constraint_evidence, Symbolics.unwrap(expr), ctx.key)
     if haskey(cache, key) && cache[key].sign !== undetermined
         return cache[key]
     end
@@ -156,8 +190,8 @@ function _infer_tree(expr, components)
     args = SymbolicUtils.arguments(simplified)
 
     # Recurse down. If a leaf is undetermined and not cached, this will bubble up.
-    children = [_infer_tree(arg, components) for arg in args]
-    result = _combine_child_signs(op, children)
+    children = [_infer_tree(arg, ctx) for arg in args]
+    result = _combine_child_evidence(op, children)
 
     # Only cache if we actually deduced something useful to save memory
     if result.sign !== undetermined || result.divisibility !== undetermined
@@ -190,7 +224,7 @@ end
 
 # affine checks
 function _update_affine_bound!(bounds, expr, iv, op)
-    affine = _affine_coefficients(expr, iv)
+    affine = _affine_coefficients(expr, Symbolics.unwrap(iv))
     affine === nothing && return true # true indicates the domain remains feasible
 
     coeff = SymbolicUtils.unwrap_const(affine[1])
@@ -252,15 +286,40 @@ function _affine_coefficients(expr, iv)
     return nothing
 end
 
+# Feasibility probes.  The sign of `expr` over a domain is probed with
+# non-strict inequalities; the zero set {expr = 0} is {expr ≤ 0} ∩ {expr ≥ 0},
+# stated as two inequalities because domain constraints are inequalities.
+function _sign_probe(expr, which::Symbol)
+    which === :nonpositive && return [SymRelation(expr, Symbol("<="))]
+    which === :nonnegative && return [SymRelation(expr, Symbol(">="))]
+    which === :zero && return [SymRelation(expr, Symbol("<=")), SymRelation(expr, Symbol(">="))]
+    throw(ArgumentError("unknown probe $which"))
+end
+
+_can_be(expr, domain::SymDomain, which::Symbol) =
+    constraints_satisfiable(_sign_probe(expr, which), domain, true)
+
+# Turn the three probe answers into evidence (shared by the affine and paved stages).
+function _probe_evidence(factor, domain::SymDomain)
+    _can_be(factor, domain, :nonpositive) ||
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, positive)
+    _can_be(factor, domain, :nonnegative) ||
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, negative)
+    _can_be(factor, domain, :zero) ||
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, either)
+    return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), haszero, undetermined)
+end
+
 """
-    _affine_factor_evidence(factor, components, sys)
+    _affine_factor_evidence(factor, ctx, sys)
 
 Classify a factor that is affine in one independent variable.  The domain
 solver already handles linear inequalities and equalities, so asking it
 whether the affine zero set is feasible gives a conservative, reusable proof
-without factoring the expression again.
+without factoring the expression again.  Only the domain factor containing that
+variable is consulted.
 """
-function _affine_factor_evidence(factor, components, sys::DiffEqLeaf)
+function _affine_factor_evidence(factor, ctx::EvidenceDomain, sys::DESys)
     factor_variables = Symbolics.get_variables(Symbolics.unwrap(factor))
     independent_variables = [iv for iv in sys.ivs if _contains_equal(factor_variables, iv)]
     length(independent_variables) == 1 || return nothing
@@ -269,31 +328,12 @@ function _affine_factor_evidence(factor, components, sys::DiffEqLeaf)
     coefficients = _affine_coefficients(Symbolics.unwrap(factor), Symbolics.unwrap(iv))
     coefficients === nothing && return nothing
 
-    coeff_evidence = _infer_tree(coefficients[1], components)
+    coeff_evidence = _infer_tree(coefficients[1], ctx)
     coeff_evidence.sign in (positive, negative) || return nothing
 
-    for component in components
-        key, _ = component
-        _contains_equal(_key_variables(key), iv) || continue
-
-        can_be_nonpositive = constraints_satisfiable([factor ≤ 0], [component], true)
-        if !can_be_nonpositive
-            return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, positive)
-        end
-
-        can_be_nonnegative = constraints_satisfiable([factor ≥ 0], [component], true)
-        if !can_be_nonnegative
-            return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, negative)
-        end
-
-        can_be_zero = constraints_satisfiable([factor == 0], [component], true)
-        if !can_be_zero
-            return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, either)
-        end
-
-        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), haszero, undetermined)
-    end
-    return nothing
+    dfactor = factor_of(ctx.source, iv)
+    dfactor === nothing && return nothing
+    return _probe_evidence(factor, subdomain(ctx.source, [dfactor]))
 end
 # TODO: Extend affine zero-set reasoning to factors involving multiple
 # independent variables. Require all variables to belong to one domain
@@ -312,7 +352,7 @@ gradient to tighten each component enclosure.  This is applicable to
 transcendental expressions as well as polynomials and must remain conservative
 when a derivative extension is unavailable.
 """
-function _centered_factor_divisibility(factor, components, sys::DiffEqLeaf)
+function _centered_factor_evidence(factor, ctx::EvidenceDomain, sys::DESys)
     return nothing # PSEUDOCODE: replace with centered/mean-value forms.
 end
 
@@ -323,7 +363,7 @@ TODO (implementation): call Sturm root isolation only when `factor` is
 provably a polynomial in exactly one independent variable.  Treating
 `sin(x)`/`exp(x)` as polynomial atoms is not sufficient for this stage.
 """
-function _sturm_factor_divisibility(factor, components, sys::DiffEqLeaf)
+function _sturm_factor_evidence(factor, ctx::EvidenceDomain, sys::DESys)
     return nothing # PSEUDOCODE: replace with certified Sturm isolation.
 end
 
@@ -333,35 +373,11 @@ Final general fallback.
 Formulates `domain ∧ factor relation 0` and evaluates feasibility via branch-and-prune paving. 
 An unresolved boundary box produces `undetermined`, never `divisible`.
 """
-function _paved_factor_evidence(factor, components, sys::DiffEqLeaf)
-    can_be_nonpositive = false
-    can_be_nonnegative = false
-    can_be_zero = false
-
-    # Evaluate across the union of all relevant topological components
-    for component in components
-        can_be_nonpositive |= constraints_satisfiable([factor ≤ 0], [component], true)
-        can_be_nonnegative |= constraints_satisfiable([factor ≥ 0], [component], true)
-        can_be_zero |= constraints_satisfiable([factor == 0], [component], true)
-    end
-
-    # If a non-positive value is mathematically impossible across all components
-    if !can_be_nonpositive
-        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, positive)
-    end
-
-    # If a non-negative value is mathematically impossible across all components
-    if !can_be_nonnegative
-        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, negative)
-    end
-
-    # If it can take both signs but rigorously never touches zero
-    if !can_be_zero
-        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, either)
-    end
-
-    # The paving algorithm found a feasible zero or hit its tolerance limit on the boundary
-    return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), haszero, undetermined)
+function _paved_factor_evidence(factor, ctx::EvidenceDomain, sys::DESys)
+    # The relevant domain factors form a product and `factor` couples them, so
+    # the question is asked once, jointly, over exactly those factors.  Pavings
+    # of unrelated factors are never computed.
+    return _probe_evidence(factor, _ctx_domain!(ctx))
 end
 
 # evidence helpers
@@ -373,14 +389,6 @@ function _evidence_from_literal(literal::Real)
     else
         return ConstraintEvidence(interval(literal, literal), haszero, iszero)
     end
-end
-
-function _evidence_components(sys::DiffEqLeaf, factor)
-    factor_variables = Set(Symbolics.get_variables(Symbolics.unwrap(factor)))
-    return [
-        key => constraints for (key, constraints) in sys.domain
-                               if !isempty(intersect(factor_variables, Set(_key_variables(key))))
-    ]
 end
 
 function _structural_sign(op, children)
@@ -439,13 +447,12 @@ function _combined_constraint_sign(found_positive, found_negative)
     return found_positive ? positive : negative
 end
 
-function _divisibility_cache_key(factor, components)
-    # TODO: Replace this structural tuple with the canonical expression/domain
-    # key used by the global cache once cache invalidation is finalized.
-    (:divisibility, Symbolics.unwrap(factor), components)
-end
+# Content key of the relevant domain factors (see `factors_content_key`): valid
+# exactly as long as those constraints are, so no invalidation step is needed.
+_divisibility_cache_key(factor, ctx::EvidenceDomain) =
+    (:divisibility, Symbolics.unwrap(factor), ctx.key)
 
-function _has_depvar_or_diff(expr, sys::DiffEqLeaf)
+function _has_depvar_or_diff(expr, sys::DESys)
     any(variable -> _contains_equal(sys.dvs, variable),
         Symbolics.get_variables(Symbolics.unwrap(expr))) && return true
 
@@ -456,7 +463,7 @@ function _has_depvar_or_diff(expr, sys::DiffEqLeaf)
         SymbolicUtils.arguments(expression))
 end
 
-function _can_divide_by(expr::Symbolics.Num, sys::DiffEqLeaf)
+function _can_divide_by(expr::Symbolics.Num, sys::DESys)
     _contains_equal(sys.dvs, expr) && return false
     _has_depvar_or_diff(expr, sys) && return false
 
