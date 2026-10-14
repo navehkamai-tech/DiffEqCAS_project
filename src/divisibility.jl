@@ -71,14 +71,14 @@ end
 
 factor_sign(factor, sys::DESys) = factor_evidence(factor, sys).sign
 
-factor_sign(factor, sys::DiffEqSystem) =
+factor_sign(factor, sys::DETree) =
     length(sys.branches) == 1 ?
     factor_sign(factor, only(sys.branches)) :
     throw(ArgumentError("factor sign requires one selected branch"))
 
 factor_divisibility(factor, sys::DESys) = factor_evidence(factor, sys).divisibility
 
-factor_divisibility(factor, sys::DiffEqSystem) =
+factor_divisibility(factor, sys::DETree) =
     length(sys.branches) == 1 ?
     factor_divisibility(factor, only(sys.branches)) :
     throw(ArgumentError("factor divisibility requires one selected branch"))
@@ -177,17 +177,17 @@ function _infer_tree(expr, ctx::EvidenceDomain)
     end
 
     # 2. Check exact literals
-    literal = SymbolicUtils.unwrap_const(Symbolics.unwrap(expr))
+    literal = SU.unwrap_const(Symbolics.unwrap(expr))
     if literal isa Real
         return _evidence_from_literal(literal)
     end
 
     # 3. Recursive subexpression inference
     simplified = simplify(expr)
-    SymbolicUtils.iscall(simplified) || return ConstraintEvidence(interval(-Inf, Inf), undetermined, undetermined) #[cite: 1]
+    SU.iscall(simplified) || return ConstraintEvidence(interval(-Inf, Inf), undetermined, undetermined) #[cite: 1]
 
-    op = SymbolicUtils.operation(simplified)
-    args = SymbolicUtils.arguments(simplified)
+    op = SU.operation(simplified)
+    args = SU.arguments(simplified)
 
     # Recurse down. If a leaf is undetermined and not cached, this will bubble up.
     children = [_infer_tree(arg, ctx) for arg in args]
@@ -227,8 +227,8 @@ function _update_affine_bound!(bounds, expr, iv, op)
     affine = _affine_coefficients(expr, Symbolics.unwrap(iv))
     affine === nothing && return true # true indicates the domain remains feasible
 
-    coeff = SymbolicUtils.unwrap_const(affine[1])
-    intercept = SymbolicUtils.unwrap_const(affine[2])
+    coeff = SU.unwrap_const(affine[1])
+    intercept = SU.unwrap_const(affine[2])
     (coeff isa Real && intercept isa Real) || return true
 
     val = -intercept / coeff
@@ -251,9 +251,9 @@ end
 function _affine_coefficients(expr, iv)
     isequal(expr, iv) && return (one(expr), zero(expr))
     _contains_equal(Symbolics.get_variables(expr), iv) || return (zero(expr), expr)
-    SymbolicUtils.iscall(expr) || return nothing
-    op = SymbolicUtils.operation(expr)
-    args = SymbolicUtils.arguments(expr)
+    SU.iscall(expr) || return nothing
+    op = SU.operation(expr)
+    args = SU.arguments(expr)
     if op === (+)
         parts = [_affine_coefficients(arg, iv) for arg in args]
         any(isnothing, parts) && return nothing
@@ -457,10 +457,10 @@ function _has_depvar_or_diff(expr, sys::DESys)
         Symbolics.get_variables(Symbolics.unwrap(expr))) && return true
 
     expression = Symbolics.unwrap(expr)
-    SymbolicUtils.iscall(expression) || return false
+    SU.iscall(expression) || return false
     Symbolics.operation(expression) isa Differential && return true
     any(argument -> _has_depvar_or_diff(argument, sys),
-        SymbolicUtils.arguments(expression))
+        SU.arguments(expression))
 end
 
 function _can_divide_by(expr::Symbolics.Num, sys::DESys)

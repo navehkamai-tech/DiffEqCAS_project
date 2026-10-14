@@ -6,7 +6,7 @@ using DiffEqCAS
 @parameters x
 @variables u(x)
 
-system = DiffEqSystem(
+system = DETree(
     [x * u + x ~ 0],
     Symbolics.Equation[],
     [x => [x > 0]],
@@ -19,12 +19,12 @@ result = simplify_system(system)
 @test length(result.branches) == 1
 @test string(result.branches[1].eqs[1].rhs) == "0"
 @test string(simplify(result.branches[1].eqs[1].lhs - (1 + u))) == "0"
-@test result.branches[1].history.steps isa Vector{DerivationStep}
+@test result.branches[1].history.steps isa Vector{XStep}
 @test length(result.branches[1].history.steps) == 1
 @test only(result.branches[1].history.steps).options ==
     SimplificationOptions()#needs modification before running again as SimplificationOptions was deprecated
 
-dependent_factor = DiffEqSystem(
+dependent_factor = DETree(
     [u * u ~ 0],
     Symbolics.Equation[],
     [x => [x > 0]],
@@ -37,7 +37,7 @@ dependent_result = simplify_system(dependent_factor)
 @test string(simplify(
     dependent_result.branches[1].eqs[1].lhs - u^2)) == "0"
 
-duplicate_union = DiffEqSystem()
+duplicate_union = DETree()
 @test push_branch!(duplicate_union, DESys(
     [u ~ 0], Symbolics.Equation[], [x => [x > 0]], [x], [u]))
 @test push_branch!(duplicate_union, DESys(

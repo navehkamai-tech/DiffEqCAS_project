@@ -22,7 +22,7 @@ domain = SymDomain([
     x => [-1 <= x, x <= 1],
     y => [-1 <= y, y <= 1],
 ])
-sys = DiffEqSystem(eqs, bcs, domain, [t, x, y], [u[1], u[2], u[3]], name=:test_sys)
+sys = DETree(eqs, bcs, domain, [t, x, y], [u[1], u[2], u[3]], name=:test_sys)
 
 @variables v(t, x, y)[1:3]
 

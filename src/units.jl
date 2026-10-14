@@ -22,7 +22,7 @@ function has_full_dimensions(sys::DESys)
     return !any(getunit(v)===nothing for v in symbols)
 end
 
-has_full_dimensions(sys::DiffEqSystem) =
+has_full_dimensions(sys::DETree) =
     all(has_full_dimensions, sys.branches)
 
 function get_units_vector(var, basis::AbstractVector{Symbol}=SI_BASIS)

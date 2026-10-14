@@ -1,6 +1,6 @@
 #operator used for boundary conditions
 @register_symbolic Restrict(expr, domain)
-SymbolicUtils.promote_symtype(::typeof(Restrict), _...) = Real
+SU.promote_symtype(::typeof(Restrict), _...) = Real
 
 
 function _record_variables!(variables, seen, key_variables)
@@ -211,9 +211,9 @@ function shrink_bounds!(bounds, constraint::DomConstraint)
     end
     op = _get_relation(constraint.relation)
     coeff = Symbolics.coeff(expr, var)
-    coeff_value = SymbolicUtils.unwrap_const(Symbolics.unwrap(coeff))
+    coeff_value = SU.unwrap_const(Symbolics.unwrap(coeff))
     coeff_value isa Real || return bounds
-    num = SymbolicUtils.unwrap_const(Symbolics.unwrap(substitute(expr, var => 0) / coeff))
+    num = SU.unwrap_const(Symbolics.unwrap(substitute(expr, var => 0) / coeff))
     num isa Real || return bounds
     if (((op === <) || (op === ≤)) && (coeff_value > 0)) ||
         (((op === >) || (op === ≥)) && (coeff_value < 0))
@@ -227,15 +227,15 @@ end
 
 function _domain_interval_value(expr, variables, box)
     unwrapped = Symbolics.unwrap(expr)
-    literal = SymbolicUtils.unwrap_const(unwrapped)
+    literal = SU.unwrap_const(unwrapped)
     literal isa Real && return bareinterval(literal)
     for (index, variable) in pairs(variables)
         isequal(unwrapped, Symbolics.unwrap(variable)) &&
             return box[index]
     end
-    SymbolicUtils.iscall(unwrapped) || return interval(-Inf, Inf)
-    op = SymbolicUtils.operation(unwrapped)
-    args = SymbolicUtils.arguments(unwrapped)
+    SU.iscall(unwrapped) || return interval(-Inf, Inf)
+    op = SU.operation(unwrapped)
+    args = SU.arguments(unwrapped)
     values = [_domain_interval_value(arg, variables, box) for arg in args]
     if op === (+)
         return sum(values)
@@ -503,9 +503,85 @@ function constraints_satisfiable(
     return true
 end
 
-add_domain_paving(sys::DiffEqSystem) = foreach(add_domain_paving, sys.branches)
+add_domain_paving(sys::DETree) = foreach(add_domain_paving, sys.branches)
 
-function is_in_domain(coord::StaticArrays.SVector, sys::DiffEqSystem,
+function is_in_domain(coord::StaticArrays.SVector, sys::DETree,
     include_boundary::Bool=true)
     all(is_in_domain(coord, branch, include_boundary) for branch in sys.branches)
+end
+
+# ---------------------------------------------------------------------------
+# Domain rewriting
+#
+# A transformation rewrites the constraints of the factors it touches; the
+# factors it does not touch are left alone.  The result is rebuilt from the
+# rewritten constraints (a coordinate change can merge or split factors), and
+# then `share_factors` hands every factor whose variables, Ids and constraint
+# content came out unchanged its old factor object back, paving included.  A
+# factor that was really rewritten therefore starts with no paving, and an
+# untouched one keeps the one it had.  Nothing here ever copies a paving by hand.
+# ---------------------------------------------------------------------------
+
+# Variables a factor's variables turn into under `mapping`.
+function _mapped_factor_variables(factor::DomBlock, mapping)
+    variables = Any[]
+    for variable in factor.variables
+        mapped = haskey(mapping, variable) ? substitute(variable, mapping) : variable
+        for mapped_variable in Symbolics.get_variables(Symbolics.unwrap(mapped))
+            push!(variables, mapped_variable)
+        end
+    end
+    return _ordered_unique(variables)
+end
+
+"""
+    _rebuild_domain(domain, touched, rewrite, mapped_variables)
+
+* `touched(factor)`: does the transformation affect this factor?
+* `rewrite(relation)`: the transformed `SymRelation` (Ids are preserved).
+* `mapped_variables(factor)`: the variables of a touched factor after the
+  transformation.  Only used when the rewritten constraints mention no variable
+  at all (an unconstrained factor, or a degenerate mapping): there is then
+  nothing to regroup by, so the mapped variables become the factor's key.
+  Otherwise factors are re-derived from the rewritten constraints, which lets
+  coupled constraints collapse when a coordinate becomes redundant, e.g.
+  x^2 + y^2 < 1 becoming r^2 < 1 under polar coordinates.
+"""
+function _rebuild_domain(domain::SymDomain, touched, rewrite, mapped_variables)
+    declared = Pair[]
+    constraints = DomConstraint[]
+    for factor in domain.factors
+        is_touched = touched(factor)
+        members = DomConstraint[constraints_of(domain, factor)...]
+        is_touched && (members = DomConstraint[DomConstraint(c.id, rewrite(c.relation)) for c in members])
+
+        if any(c -> !isempty(constraint_variables(c)), members)
+            append!(constraints, members)
+        else
+            variables = is_touched ? mapped_variables(factor) : collect(factor.variables)
+            push!(declared, (length(variables) == 1 ? only(variables) : Tuple(variables)) => members)
+        end
+    end
+    rebuilt = add_constraints(SymDomain(declared), constraints)
+    return share_factors(rebuilt, domain)
+end
+
+# Transform domain constraints under an independent-variable change.  Only
+# factors containing a mapped variable are rewritten.  `ivs` is accepted for
+# compatibility; the stored form is canonical and does not depend on it.
+function transform_domains(domain::SymDomain, iv_mapping::Dict, ivs=nothing)
+    _rebuild_domain(
+        domain,
+        factor -> any(variable -> haskey(iv_mapping, variable), factor.variables),
+        relation -> SymRelation(simplify(substitute(relation.residual, iv_mapping)), relation.relation),
+        factor -> _mapped_factor_variables(factor, iv_mapping))
+end
+
+# Same for a parameter change: constraints such as `x < a` change when `a` does.
+function transform_domain_parameters(domain::SymDomain, param_mapping::Dict)
+    _rebuild_domain(
+        domain,
+        factor -> any(variable -> haskey(param_mapping, variable), factor.variables),
+        relation -> SymRelation(simplify(substitute(relation.residual, param_mapping)), relation.relation),
+        factor -> _mapped_factor_variables(factor, param_mapping))
 end

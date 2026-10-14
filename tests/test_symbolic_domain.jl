@@ -16,7 +16,7 @@ domain = SymDomain([
 @test isequal(domain[1].first, x)
 @test isequal(domain[2].first, (y, z))
 
-sys = DiffEqSystem([], [], domain, [x, y, z], [])
+sys = DETree([], [], domain, [x, y, z], [])
 @test sys.domain isa SymDomain
 @test all(isequal.(collect(sys.domain), collect(domain)))
 
@@ -34,6 +34,6 @@ sys.domain = SymDomain([x => [x > 0]])
 @test !DiffEqCAS.is_in_domain(SVector(1.5), [x => [x > 0, x < 1]])
 
 @variables x2 y2 z2
-component_system = DiffEqSystem(
+component_system = DETree(
     [], [], [x2 => [], (y2, z2) => [y2 > 2, y2 < 1]], [x2, y2, z2], [])
 @test DiffEqCAS.factor_divisibility(x2, component_system).status === DiffEqCAS.haszero

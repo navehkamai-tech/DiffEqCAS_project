@@ -41,5 +41,5 @@ function nondimensionalize_pde(sys::DESys, basis=SI_BASIS)
     end
 end
 
-nondimensionalize_pde(sys::DiffEqSystem, basis=SI_BASIS) =
-    DiffEqSystem([nondimensionalize_pde(branch, basis) for branch in sys.branches])
+nondimensionalize_pde(sys::DETree, basis=SI_BASIS) =
+    DETree([nondimensionalize_pde(branch, basis) for branch in sys.branches])

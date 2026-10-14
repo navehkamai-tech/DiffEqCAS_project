@@ -1,15 +1,15 @@
 
 function display_expr(expr)
-    # Unwrap to access the raw SymbolicUtils tree
+    # Unwrap to access the raw SU tree
     expr_unwrapped = Symbolics.unwrap(expr)
 
     # 1. Base Case: If it's just a variable (x) or a number (5), leave it alone
-    if !SymbolicUtils.iscall(expr_unwrapped)
+    if !SU.iscall(expr_unwrapped)
         return expr
     end
 
-    op = SymbolicUtils.operation(expr_unwrapped)
-    args = SymbolicUtils.arguments(expr_unwrapped)
+    op = SU.operation(expr_unwrapped)
+    args = SU.arguments(expr_unwrapped)
 
     # 2. The Magic: Intercepting the Differentials
     if op isa Differential
@@ -17,9 +17,9 @@ function display_expr(expr)
         curr = expr_unwrapped
 
         # Dig all the way down the nested rabbit hole and collect the variables
-        while SymbolicUtils.iscall(curr) && SymbolicUtils.operation(curr) isa Differential
-            push!(vars, SymbolicUtils.operation(curr).x)
-            curr = SymbolicUtils.arguments(curr)[1]
+        while SU.iscall(curr) && SU.operation(curr) isa Differential
+            push!(vars, SU.operation(curr).x)
+            curr = SU.arguments(curr)[1]
         end
 
         # Join the variables into a single string (e.g., "x", "y" becomes "xy")
@@ -27,7 +27,7 @@ function display_expr(expr)
 
         # Create a temporary, fake function operator just for printing
         # This creates a callable symbol like D_xy
-        display_op = SymbolicUtils.Sym{SymbolicUtils.FnType{Tuple,Real}}(Symbol("D_{$var_str}"))
+        display_op = SU.Sym{SU.FnType{Tuple,Real}}(Symbol("D_{$var_str}"))
 
         # Process whatever is inside the derivative, then wrap it in our fake function
         return wrap(display_op(Symbolics.unwrap(display_pde(curr))))
@@ -35,7 +35,7 @@ function display_expr(expr)
 
     # 3. For Everything Else: (+, *, ^), rebuild the tree normally
     processed_args = map(a -> Symbolics.unwrap(display_pde(a)), args)
-    return wrap(SymbolicUtils.similarterm(expr_unwrapped, op, processed_args))
+    return wrap(SU.similarterm(expr_unwrapped, op, processed_args))
 end
 
 function display_pde(eq::Symbolics.Equation)

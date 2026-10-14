@@ -15,7 +15,7 @@ domain = [
     x => [-1 < x, x < 1],
     y => [-1 < y, y < 1],
 ]
-sys = DiffEqSystem(eqs, bcs, domain, [t, x, y], [u]; name=:domain_change)
+sys = DETree(eqs, bcs, domain, [t, x, y], [u]; name=:domain_change)
 
 new_sys = change_ivs(
     sys,
@@ -27,7 +27,7 @@ new_sys = change_ivs(
 @test isequal(new_sys.domain[1].first, t)
 @test isequal(new_sys.domain[2].first, (r, theta))
 
-disk_sys = DiffEqSystem(
+disk_sys = DETree(
     [],
     [],
     [(x, y) => [x^2 + y^2 < 1]],

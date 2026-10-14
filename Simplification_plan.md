@@ -2,7 +2,7 @@
 
 This document is the implementation template for simplification in
 `DiffEqCAS`. It is intentionally organized around the existing
-`DiffEqSystem`/`DESys` architecture rather than around independent
+`DETree`/`DESys` architecture rather than around independent
 expression-processing utilities.
 
 The planned simplifier has two architectural levels:
@@ -16,10 +16,10 @@ The planned simplifier has two architectural levels:
    through the integrated branch pipeline.
 
 These are not unrelated modes. They are nested operations on one
-`DiffEqSystem`:
+`DETree`:
 
 ```text
-one DiffEqSystem
+one DETree
     |
     +-- for each branch:
     |       integrated branch simplification
@@ -33,16 +33,16 @@ one DiffEqSystem
 The public operation remains:
 
 ```julia
-simplify_system(sys::DiffEqSystem; options=SimplificationOptions())
+simplify_system(sys::DETree; options=SimplificationOptions())
 ```
 
-It accepts one system and returns one new `DiffEqSystem`. A system may contain
+It accepts one system and returns one new `DETree`. A system may contain
 multiple `DESys` values because branches represent a union of solution
 sets, but the simplifier does not create a second independent system context.
 
 ### Task block: architecture and state
 
-- [x] Add immutable `SimplificationRoot` snapshots to `DiffEqSystem`.
+- [x] Add immutable `SimplificationRoot` snapshots to `DETree`.
 - [ ] Preserve the root when constructing transformed systems.
 - [ ] Record the source of added domain restrictions in transformation history or diagnostics.
 
@@ -77,13 +77,13 @@ sets, but the simplifier does not create a second independent system context.
 - [ ] Test domain restrictions, provenance, and cache invalidation.
 - [ ] Test dependent-variable branch splitting, deduplication, and branch limits.
 - [ ] Test system substitutions followed by local recollection.
-- [ ] Test preservation of `DiffEqSystem` metadata and `SimplificationStep(options)`.
+- [ ] Test preservation of `DETree` metadata and `SimplificationStep(options)`.
 
 ## 1. Existing architecture and design decisions
 
-### 1.1 `DiffEqSystem` is the orchestration boundary
+### 1.1 `DETree` is the orchestration boundary
 
-`DiffEqSystem` already owns:
+`DETree` already owns:
 
 - the current `branches`;
 - pending and completed branch work;
@@ -98,7 +98,7 @@ coordinates the run, while branch-local helpers receive a selected
 
 The simplifier should not mutate the caller's system. It should construct
 transformed branches, preserve branch metadata, and return a new
-`DiffEqSystem`. This matches the current `_with_simplified_expressions` and
+`DETree`. This matches the current `_with_simplified_expressions` and
 `_simplify_one_system` direction.
 
 ### 1.2 `DESys` is the unit of assumptions and history
@@ -110,7 +110,7 @@ Each branch carries:
 - a `SymDomain`;
 - interval/domain cache information;
 - restrictions/trivial-solution metadata;
-- a `DerivationHistory`.
+- a `XChain`.
 
 Assumption-aware transformations must operate on one branch at a time because
 nonzero facts and branch restrictions are branch-specific. System-wide
@@ -123,13 +123,13 @@ An input root is useful provenance, but it is not needed to execute
 simplification. It allows callers and tests to answer "what did this result
 come from?" without reconstructing the input from a later history.
 
-The root should be an immutable snapshot owned by `DiffEqSystem`, not a
-reference to a mutable `DiffEqSystem` and not a parent pointer. Storing the
+The root should be an immutable snapshot owned by `DETree`, not a
+reference to a mutable `DETree` and not a parent pointer. Storing the
 mutable input object would not preserve the original state if that object were
-later changed. Storing a whole `DiffEqSystem` would also copy work queues and
+later changed. Storing a whole `DETree` would also copy work queues and
 deduplication state that are execution details rather than input data.
 
-Because one `DiffEqSystem` can contain several initial branches, the snapshot
+Because one `DETree` can contain several initial branches, the snapshot
 should contain one immutable record per initial branch. It does not need to
 reuse `DESys`; its job is to preserve input values, not to participate
 in branch processing:
@@ -147,11 +147,11 @@ the fields `identifier`, `ivs`, `dvs`, `ps`, `eqs`, `bcs`, `original_domain`,
 `restrictions`, and `name`; it should not store mutable
 `DESys` objects inside the root.
 
-Conceptually, the `DiffEqSystem` proposal therefore becomes (preserving the
+Conceptually, the `DETree` proposal therefore becomes (preserving the
 existing type parameters in the implementation):
 
 ```julia
-mutable struct DiffEqSystem
+mutable struct DETree
     branches::Vector{DESys}
     pending::Stack{DESys}
     completed::Vector{DESys}
@@ -161,7 +161,7 @@ end
 ```
 
 The root is created when the system is constructed and copied unchanged into
-results. `DerivationHistory` still records _how_ a branch changed, while
+results. `XChain` still records _how_ a branch changed, while
 `root` records _what the complete input system was_. No DAG, parent links, or
 copied intermediate systems are required.
 
@@ -203,7 +203,7 @@ Base.@kwdef struct SimplificationOptions
     reduction_strategy::Symbol = :conservative
 end
 
-struct SimplificationStep <: DerivationStep
+struct SimplificationStep <: XStep
     options::SimplificationOptions
 end
 ```
@@ -409,7 +409,7 @@ all original constraints in every transformed branch.
 
 ### 1.6 Results and diagnostics
 
-The normal public result is still `DiffEqSystem`. Internal helpers need
+The normal public result is still `DETree`. Internal helpers need
 structured results so a rejected or budget-limited transformation is visible:
 
 Diagnostics should normally remain internal until a public reporting API is
@@ -550,7 +550,7 @@ subexpressions remain atoms or are left untouched.
 ### 2.4 Which proposed structs persist
 
 The design intentionally keeps the data model small. Persistent state belongs
-in `DiffEqSystem`, `DESys`, and `DerivationHistory`; the following
+in `DETree`, `DESys`, and `XChain`; the following
 additional types have distinct roles:
 
 | Type                  | Role                                                           | Why it is not another existing field                                   |
@@ -1082,7 +1082,7 @@ branch 2: g != 0
 ```
 
 The nonzero branch may cancel `g`; the zero branch retains the pre-cancellation
-equation. Both branches receive an appropriate `DerivationStep`, and both
+equation. Both branches receive an appropriate `XStep`, and both
 retain all original metadata.
 
 The split is enabled only when `enable_branch_splitting` is true and the
@@ -1138,7 +1138,7 @@ assumption/proof portion of the integrated branch pipeline.
 ### 5.1 Role and contract
 
 System reduction is the only layer allowed to use one equation as information
-about another. It operates on the complete `DiffEqSystem`, but applies
+about another. It operates on the complete `DETree`, but applies
 transformations branch by branch because each branch is a separate solution-set
 component.
 
@@ -1191,7 +1191,7 @@ struct EquationRelation
     certificate::Any
 end
 
-struct SystemReductionStep <: DerivationStep
+struct SystemReductionStep <: XStep
     relations::Vector{EquationRelation}
     method::Symbol
 end
@@ -1275,7 +1275,7 @@ Replacing equations requires an equivalence certificate or explicit branches.
 ### 5.9 System reduction pseudocode
 
 ```julia
-function simplify_system(sys::DiffEqSystem;
+function simplify_system(sys::DETree;
     options=SimplificationOptions())
 
     current = _copy_system(sys)
@@ -1317,7 +1317,7 @@ After each branch-local pass and each system-reduction pass:
 - preserve parameter/domain-only conditions as restrictions;
 - deduplicate branches using canonical fingerprints;
 - preserve `pending`, `completed`, and `seen` semantics through the returned
-  `DiffEqSystem`.
+  `DETree`.
 
 The current `_branch_fingerprint` is the foundation, but it should eventually
 fingerprint canonical equations and normalized domains so syntactically
@@ -1328,7 +1328,7 @@ different routes to the same branch merge reliably.
 The following is the intended full pipeline for one call:
 
 ```text
-input DiffEqSystem
+input DETree
     |
     v
 copy system and preserve original histories
@@ -1349,7 +1349,7 @@ if system reduction is enabled:
     |
     v
 append SimplificationStep(options) to each changed branch
-return DiffEqSystem
+return DETree
 ```
 
 The order is not merely procedural:
@@ -1441,7 +1441,7 @@ history or diagnostics if that explanation is needed.
 
 1. Keep `simplify_system` as the public orchestration entry point and refactor
    its current helpers into explicit integrated branch stages.
-2. Add immutable `SimplificationRoot` snapshots to `DiffEqSystem` construction
+2. Add immutable `SimplificationRoot` snapshots to `DETree` construction
    and copying before transformations are implemented.
 3. Implement residual canonicalization and identity/contradiction
    classification while preserving `DESys` metadata.
@@ -1469,7 +1469,7 @@ history or diagnostics if that explanation is needed.
     their history, regularity, and solution-set semantics are tested.
 
 This order produces useful behavior at every step and keeps the implementation
-aligned with the existing architecture: one `DiffEqSystem` is simplified at a
+aligned with the existing architecture: one `DETree` is simplified at a
 time, branches carry assumptions and history, and `SimplificationOptions`
 describes and records the complete run.
 

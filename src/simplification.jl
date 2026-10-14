@@ -32,7 +32,7 @@ Base.@kwdef struct SimplificationOptions
         return new(msp, mr, mn, mdn, ed, ep, rules)
     end
 end
-struct Simplification <: DerivationStep
+struct Simplification <: XStep
     options::SimplificationOptions
 end
 
@@ -167,25 +167,25 @@ SimplifyContext(opts) = SimplifyContext(opts, Set{Any}(), 0, String[])
 
 # D of a variable, of x(t), or of nested D of those, behaves like a leaf.
 function _is_atomic(a)
-    SymbolicUtils.iscall(a) || return true
-    op = SymbolicUtils.operation(a)
-    op isa SymbolicUtils.Symbolic && return true     # unknown function x(t)
-    op isa SymbolicUtils.Differential &&
-        return _is_atomic(SymbolicUtils.arguments(a)[1])
+    SU.iscall(a) || return true
+    op = SU.operation(a)
+    op isa SU.Symbolic && return true     # unknown function x(t)
+    op isa SU.Differential &&
+        return _is_atomic(SU.arguments(a)[1])
     return false
 end
 
 function _is_transparent_diff(expr)
-    op = SymbolicUtils.operation(expr)
-    return op isa SymbolicUtils.Differential &&
-        _is_atomic(SymbolicUtils.arguments(expr)[1])
+    op = SU.operation(expr)
+    return op isa SU.Differential &&
+        _is_atomic(SU.arguments(expr)[1])
 end
 
 # Look up or create the region for `new_expr`; returns its dummy.
 function _intern!(ab::Abstraction, new_expr)
     i = get!(ab.index, new_expr) do
         n = length(ab.regions) + 1
-        d = SymbolicUtils.Sym{Real}(Symbol("_D_", n))  # can't collide with user names
+        d = SU.Sym{Real}(Symbol("_D_", n))  # can't collide with user names
         push!(ab.regions, Region(d, new_expr, 0, :converged))
         ab.by_dummy[d] = n
         n
@@ -197,13 +197,13 @@ end
 const ALGEBRAIC_OPS = Set([+, *, ^])
 
 function _abstract(expr, ab::Abstraction, parent_alg::Bool)
-    SymbolicUtils.iscall(expr) || return expr
+    SU.iscall(expr) || return expr
     _is_transparent_diff(expr) && return expr
 
-    op = SymbolicUtils.operation(expr)
+    op = SU.operation(expr)
     is_alg = op in ALGEBRAIC_OPS
-    new_args = [_abstract(a, ab, is_alg) for a in SymbolicUtils.arguments(expr)]
-    new_expr = maketerm(typeof(expr), op, new_args, SymbolicUtils.metadata(expr))
+    new_args = [_abstract(a, ab, is_alg) for a in SU.arguments(expr)]
+    new_expr = maketerm(typeof(expr), op, new_args, SU.metadata(expr))
 
     # A non-algebraic node under an algebraic parent becomes a region.
     return (!is_alg && parent_alg) ? _intern!(ab, new_expr) : new_expr
@@ -213,7 +213,7 @@ end
 # for that residual. Bare leaves (a lone symbol or number) need no region.
 function _abstract_root!(expr, ab::Abstraction)
     skeleton = _abstract(expr, ab, false)
-    return SymbolicUtils.iscall(skeleton) ? _intern!(ab, skeleton) : skeleton
+    return SU.iscall(skeleton) ? _intern!(ab, skeleton) : skeleton
 end
 
 # Resolve in creation order; each region only needs already-resolved dummies.
@@ -227,8 +227,8 @@ end
 
 # Dummies directly referenced by an expression (for dependency tracking).
 function _dummies_in(expr, ab::Abstraction, acc=Set{Int}())
-    if SymbolicUtils.iscall(expr)
-        foreach(a -> _dummies_in(a, ab, acc), SymbolicUtils.arguments(expr))
+    if SU.iscall(expr)
+        foreach(a -> _dummies_in(a, ab, acc), SU.arguments(expr))
     elseif haskey(ab.by_dummy, expr)
         push!(acc, ab.by_dummy[expr])
     end
@@ -247,9 +247,9 @@ _size(expr) = robust_node_count(expr)
 # Returns Inf as soon as the estimate exceeds `cap`, so it never overflows
 # and never does the expensive arithmetic for hopeless cases.
 function _expansion_cost(expr, cap::Real)
-    SymbolicUtils.iscall(expr) || return 1.0
-    op = SymbolicUtils.operation(expr)
-    args = SymbolicUtils.arguments(expr)
+    SU.iscall(expr) || return 1.0
+    op = SU.operation(expr)
+    args = SU.arguments(expr)
     _is_transparent_diff(expr) && return 1.0
     isempty(args) && return 1.0
 
@@ -259,7 +259,7 @@ function _expansion_cost(expr, cap::Real)
         prod(a -> _expansion_cost(a, cap), args)
     elseif op === ^
         base_cost = _expansion_cost(args[1], cap)
-        n = SymbolicUtils.unwrap_const(Symbolics.unwrap(args[2]))
+        n = SU.unwrap_const(Symbolics.unwrap(args[2]))
         if n isa Real && isinteger(n) && n > 1 && base_cost > 1
             # C(base_cost + n - 1, n) as a running product with early exit
             r = 1.0
@@ -357,7 +357,7 @@ end
 
 function classify_residuals!(residuals, ctx::SimplifyContext)
     for (i, res) in enumerate(residuals)
-        v = SymbolicUtils.unwrap_const(unwrap(res))
+        v = SU.unwrap_const(unwrap(res))
         local class
         if v isa Number
             iszero(v) ? class = :identity : class = :contradiction
@@ -395,7 +395,7 @@ end
 # subexpressions with a memo dict if it gets slow.
 function _nonalgebraic_pass(res, ctx::SimplifyContext)
     return res
-    # e.g. return [SymbolicUtils.Postwalk(ctx.rules)(r) for r in res]
+    # e.g. return [SU.Postwalk(ctx.rules)(r) for r in res]
 end
 
 function rebuild_branch(sys::DESys, eqs, warnings, bcs, restrictions)
@@ -436,15 +436,15 @@ end
     simplify_system(sys; options...)
 
 Simplify every branch in a system through the staged pipeline and return the
-resulting `DiffEqSystem`.
+resulting `DETree`.
 
 The input is not mutated. A changed branch receives one aggregate
 `SimplificationStep`; internal passes are deliberately not recorded as
 separate derivation steps.
 """
-function simplify_system(sys::DiffEqSystem;
+function simplify_system(sys::DETree;
     options::SimplificationOptions=SimplificationOptions())
-    return DiffEqSystem([
+    return DETree([
         _simplify_branch(branch, options)
         for branch in sys.branches
     ])
@@ -483,7 +483,7 @@ function common_divisors(expr, sys::DESys)
             index === nothing || (push!(retained, candidate); deleteat!(available, index))
         end
 
-        common_divisors(expr, sys::DiffEqSystem) =
+        common_divisors(expr, sys::DETree) =
             length(sys.branches) == 1 ?
             common_divisors(expr, only(sys.branches)) :
             throw(ArgumentError("common divisors require one selected branch"))
@@ -495,18 +495,18 @@ function common_divisors(expr, sys::DESys)
     # avoidable type conversions during division.
     [
         wrap(factor) for factor in _ordered_unique(shared)
-                         if !(SymbolicUtils.unwrap_const(Symbolics.unwrap(factor)) isa Number)
+                         if !(SU.unwrap_const(Symbolics.unwrap(factor)) isa Number)
     ]
 end
 
 # helpers for group_coefficients
 function _is_target(e, unwrapped_dvs::Set, dv_ops)
     # If it is a leaf node, check if it matches any dvendent variable directly
-    if !SymbolicUtils.iscall(e)
+    if !SU.iscall(e)
         return e in unwrapped_dvs
     end
 
-    op = SymbolicUtils.operation(e)
+    op = SU.operation(e)
 
     # Check if the operation matches any of our base dependent operations
     if any(isequal(op, d_op) for d_op in dv_ops)
@@ -515,7 +515,7 @@ function _is_target(e, unwrapped_dvs::Set, dv_ops)
 
     # Support mixed derivatives by recursively checking arguments
     if op isa Differential
-        args = SymbolicUtils.arguments(e)
+        args = SU.arguments(e)
         return _is_target(args[1], unwrapped_dvs, dv_ops)
     end
 
@@ -530,21 +530,21 @@ function _find_targets!(e, unwrapped_dvs::Set, dv_ops, targets::Set)
     end
 
     # Otherwise, keep digging through the expression tree
-    if SymbolicUtils.iscall(e)
-        for arg in SymbolicUtils.arguments(e)
+    if SU.iscall(e)
+        for arg in SU.arguments(e)
             _find_targets!(arg, unwrapped_dvs, dv_ops, targets)
         end
     end
 end
 
 function _diff_depth(e)
-    if !SymbolicUtils.iscall(e)
+    if !SU.iscall(e)
         return 0
     end
 
     # Increment depth for each Differential operation
-    if SymbolicUtils.operation(e) isa Differential
-        return 1 + _diff_depth(SymbolicUtils.arguments(e)[1])
+    if SU.operation(e) isa Differential
+        return 1 + _diff_depth(SU.arguments(e)[1])
     end
 
     return 0
@@ -554,7 +554,7 @@ function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
     expr = expand_derivatives(unwrap(eq.lhs - eq.rhs))
 
     unwrapped_dvs = Set([unwrap(d) for d in dvs])
-    dv_ops = [SymbolicUtils.operation(unwrap(d)) for d in dvs]
+    dv_ops = [SU.operation(unwrap(d)) for d in dvs]
     targets = Set()
 
     # Pass the required state into the mutator function

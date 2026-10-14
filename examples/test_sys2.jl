@@ -23,8 +23,8 @@ domain = [
     y => [-1 < y, y < 1],
 ]
 
-# Create DiffEqSystem (using internal constructors, or just fields)
-sys = DiffEqSystem(eqs, bcs, domain, [t, x, y], [u[1], u[2], u[3]], name=:test_sys)
+# Create DETree (using internal constructors, or just fields)
+sys = DETree(eqs, bcs, domain, [t, x, y], [u[1], u[2], u[3]], name=:test_sys)
 
 # Apply change_ivs
 println("Testing change_ivs:")

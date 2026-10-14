@@ -1,81 +1,17 @@
-# replace built in floating points with symbolic variables for essential constants
-# Mathematical Constants
-const π = Num(MC.pi)
-const pi = π
-const ℯ = Num(MC.e)
-const e = ℯ
-const γ = Num(MC.γ)
-const φ = Num(MC.φ)
-const catalan = Num(MC.catalan)
 
-# Complex & Boundary Constants
-const 𝕚 = Num(im)
-const ∞ = Num(Inf)
-const inf = ∞
+#symbolic rule predicate helper functions
+notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
+is_pos_param(var) = notavariable(var) && get_sign(var) == positive
+is_neg_param(var) = notavariable(var) && get_sign(var) == negative
+is_number(x) = x isa Number
+is_real(x) = x isa Real
+is_complex(x) = x isa Number && !(x isa Real)
+is_positive(x) = get_sign(x)==positive
+is_negative(x) = get_sign(x)==negative
+is_divisible(x) = nothing #? needs to be filled in
+is_integer(x) = x isa Integer
+is_domain(x) = x isa SymDomain
 
-# Light speed
-const c_0 = Num(299_792_458)
-const c = c_0
-
-# Planck constant (J * s) - exact
-const h = Num(6.62607015e-34)
-
-# Reduced Planck constant / Dirac constant (h / 2π)
-const ħ = Num(1.0545718176461565e-34)
-const hbar = ħ
-
-# Elementary charge (C) - exact
-const q_e = Num(1.602176634e-19)
-const e_charge = q_e
-
-# Boltzmann constant (J / K) - exact
-const k_B = Num(1.380649e-23)
-const k_b = k_B
-
-# Avogadro constant (1 / mol) - exact
-const N_A = Num(6.02214076e23)
-
-# Luminous efficacy of 540 THz radiation (lm / W) - exact
-const K_cd = Num(683)
-
-# Hyperfine transition frequency of Cs-133 (Hz) - exact
-const Δν_Cs = Num(9_192_631_770)
-
-# Universal gas constant: R = N_A * k_B (J / (mol * K))
-const R_gas = Num(8.31446261815324)
-
-# Newtonian constant of gravitation (m^3 / (kg * s^2))
-const G_grav = Num(6.67430e-11)
-const G = G_grav
-
-# Standard acceleration of gravity (m / s^2)
-const g_0 = Num(9.80665)
-const g = g_0
-
-# Vacuum electric permittivity / electric constant (F / m)
-# ε_0 ≈ 1 / (μ_0 * c^2)
-const ε_0 = Num(8.8541878128e-12)
-const eps0 = ε_0
-
-# Vacuum magnetic permeability / magnetic constant (N / A^2 or H / m)
-const μ_0 = Num(1.25663706212e-6)
-const mu0 = μ_0
-
-# Stefan-Boltzmann constant: σ = (2π^5 * k_B^4) / (15 * c^2 * h^3) (W / (m^2 * K^4))
-const σ_SB = Num(5.670374419e-8)
-
-# Electron mass
-const m_e = Num(9.1093837015e-31)
-
-# Proton mass
-const m_p = Num(1.67262192369e-27)
-
-# Neutron mass
-const m_n = Num(1.67492749804e-27)
-
-# Atomic mass constant / Dalton (kg)
-const m_u = Num(1.66053906660e-27)
-const u = m_u
 
 # Rules are grouped by required assumptions and pipeline stage.  The
 # simplification pipeline can later select a safe group without enabling
@@ -161,7 +97,7 @@ const SYMBOLIC_RULE_GROUPS = (
 
 
 function is_array_literal(x)
-    return SymbolicUtils.iscall(x) && SymbolicUtils.operation(x) === SymbolicUtils.array_literal
+    return SU.iscall(x) && SU.operation(x) === SU.array_literal
 end
 
 # 2. Define the rule arrays as constants
@@ -182,8 +118,8 @@ const diff_op_rules = [
 ]
 
 const dirac_rules = [
-    @rule(Dirac(~x) => is_array_literal(~x) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el), 0)) for el in SymbolicUtils.arguments(~x)[2:end]]) : nothing),
-    @rule(Dirac(~x, ~n) => (is_array_literal(~x) && ~n isa AbstractArray) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el_x), el_n)) for (el_x, el_n) in zip(SymbolicUtils.arguments(~x)[2:end], ~n)]) : nothing),
+    @rule(Dirac(~x) => is_array_literal(~x) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el), 0)) for el in SU.arguments(~x)[2:end]]) : nothing),
+    @rule(Dirac(~x, ~n) => (is_array_literal(~x) && ~n isa AbstractArray) ? prod([Symbolics.unwrap(Dirac(Symbolics.wrap(el_x), el_n)) for (el_x, el_n) in zip(SU.arguments(~x)[2:end], ~n)]) : nothing),
     @rule(Dirac(~x) => Dirac(~x, 0)),
     @rule(Dirac(-(~x), ~n) => (-1)^(~n)*Dirac(~x, ~n)),
     @acrule(Dirac(~a::notavariable * ~x, ~n) => Dirac(~x, ~n) / (abs(~a) * (~a)^(~n))),
@@ -209,4 +145,4 @@ const heaviside_rules = [
 ]
 
 # 3. Create the single, compiled rewriter constant
-const SPECIAL_REWRITER = SymbolicUtils.Postwalk(SymbolicUtils.Chain(vcat(diff_op_rules, dirac_rules, heaviside_rules)))
+const SPECIAL_REWRITER = SU.Postwalk(SU.Chain(vcat(diff_op_rules, dirac_rules, heaviside_rules)))

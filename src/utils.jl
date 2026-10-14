@@ -71,9 +71,9 @@ function _has_depvar_or_diff(expr)
 
     for v in vars
         v_un = Symbolics.unwrap(v)
-        if SymbolicUtils.iscall(v_un)
-            op = SymbolicUtils.operation(v_un)
-            if op isa Differential || op isa SymbolicUtils.Sym
+        if SU.iscall(v_un)
+            op = SU.operation(v_un)
+            if op isa Differential || op isa SU.Sym
                 return true
             end
         end
@@ -108,10 +108,10 @@ function extract_parameters(list::Tuple)
 end
 
 function get_base_op(expr)
-    if SymbolicUtils.iscall(expr)
-        op = SymbolicUtils.operation(expr)
+    if SU.iscall(expr)
+        op = SU.operation(expr)
         if op == getindex
-            return get_base_op(SymbolicUtils.arguments(expr)[1])
+            return get_base_op(SU.arguments(expr)[1])
         end
         return op
     end
@@ -123,28 +123,11 @@ function _count_nodes(node)
 
     if hasmethod(TermInterface.isexpr, Tuple{typeof(node)}) && TermInterface.isexpr(node)
         count += sum(_count_nodes(c) for c in TermInterface.children(node); init=0)
-    elseif SymbolicUtils.iscall(node)
-        count += sum(_count_nodes(c) for c in SymbolicUtils.arguments(node); init=0)
+    elseif SU.iscall(node)
+        count += sum(_count_nodes(c) for c in SU.arguments(node); init=0)
     end
 
     return count
 end
 
 robust_node_count(expr) = _count_nodes(Symbolics.unwrap(expr))
-
-#rules for stuff simplify doesn't handle well
-#symbolic rule util functions
-notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
-is_pos_param(var) = notavariable(var) && get_sign(var) == positive
-is_neg_param(var) = notavariable(var) && get_sign(var) == negative
-is_number(x) = x isa Number
-is_real(x) = x isa Real
-is_complex(x) = x isa Number && !(x isa Real)
-is_positive(x) = get_sign(x)==positive
-is_negative(x) = get_sign(x)==negative
-is_divisible(x) = nothing #? needs to be filled in
-is_integer(x) = x isa Integer
-is_domain(x) = x isa SymDomain
-
-@variables π e #what else?...
-

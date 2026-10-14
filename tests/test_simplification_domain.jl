@@ -33,17 +33,17 @@ positive_n = Symbolics.setmetadata(n, DiffEqCAS.VarSign, DiffEqCAS.positive)
 @test DiffEqCAS._bound_sign(positive_a + positive_a).sign === DiffEqCAS.positive
 
 positive_x = Symbolics.setmetadata(x, DiffEqCAS.VarSign, DiffEqCAS.positive)
-strict_sign_system = DiffEqSystem([], [], [], [x], [])
+strict_sign_system = DETree([], [], [], [x], [])
 @test DiffEqCAS.factor_divisibility(positive_x * positive_a, strict_sign_system).status ===
     DiffEqCAS.divisible
 
-system = DiffEqSystem([], [], [x => [2x > 0]], [x], [])
+system = DETree([], [], [x => [2x > 0]], [x], [])
 @test DiffEqCAS.factor_divisibility(x, system).status === DiffEqCAS.divisible
 
-positive_domain = DiffEqSystem([], [], [x => [x > 0]], [x], [])
+positive_domain = DETree([], [], [x => [x > 0]], [x], [])
 @test DiffEqCAS.factor_divisibility(x + 1, positive_domain).status === DiffEqCAS.divisible
 @test DiffEqCAS.factor_divisibility(x - 1, positive_domain).status === DiffEqCAS.haszero
 
-negative_domain = DiffEqSystem([], [], [x => [x < 0]], [x], [])
+negative_domain = DETree([], [], [x => [x < 0]], [x], [])
 @test DiffEqCAS.factor_divisibility(2x + 1, negative_domain).status === DiffEqCAS.haszero
 @test DiffEqCAS.factor_divisibility(2x - 1, negative_domain).status === DiffEqCAS.divisible

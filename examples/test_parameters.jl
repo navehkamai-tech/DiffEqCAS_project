@@ -16,7 +16,7 @@ domain = SymDomain([
     x => [-1 <= x, x <= 1],
     y => [-1 <= y, y <= 1],
 ])
-sys = DiffEqSystem(eqs, bcs, domain, [t, x, y], [u[1], u[2]], name=:sys)
+sys = DETree(eqs, bcs, domain, [t, x, y], [u[1], u[2]], name=:sys)
 
 @parameters c d
 param_mapping = Dict(a => c, b => d)
