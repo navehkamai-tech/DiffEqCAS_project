@@ -1,4 +1,43 @@
 
+@enum SolutionForm EXPLICIT IMPLICIT PARAMETRIC
+@enum SolutionRole GENERAL PARTICULAR SINGULAR
+
+"""
+    SolutionFamily
+Encapsulates the mathematical equations of the solved family and its remaining degrees of freedom.
+"""
+Base.@kwdef struct SolutionFamily
+    form::SolutionForm = EXPLICIT
+    role::SolutionRole = GENERAL
+    relations::Vector{SymEquation} = SymEquation[]  # The solutions (SeriesSum lives inside these!)
+    dofs::Vector{Symbolics.Num} = Symbolics.Num[]   # Unified DoFs: C₁, A(n), F(x - c*t)
+    dof_constraints::Vector{SymEquation} = SymEquation[] # Optional ties between DoFs, e.g. ω ~ α*k^2
+end
+
+"""
+    SolvedLeaf
+Mirrors `DESys` for a completed leaf node: holds the system context,
+any unapplied BCs, and the `SolutionFamily`.
+"""
+Base.@kwdef struct SolvedLeaf{
+    I<:AbstractVector{<:Symbolics.Num},
+    D<:AbstractVector{<:Symbolics.Num},
+    P<:AbstractVector{<:Symbolics.Num},
+    B<:AbstractVector{<:Symbolics.Equation}
+}
+    # Core System Context (matches DESys layout directly)
+    ivs::I
+    dvs::D
+    ps::P
+    bcs::B                                           # Unapplied BCs (emptied as DoFs are eliminated)
+    domain::SymDomain
+    restrictions::Vector{SymRelation} = SymRelation[]
+    history::XChain = XChain(XStep[])
+
+    # The Solved Payload
+    family::SolutionFamily
+end
+
 abstract type Transform end
 
 struct XStep
@@ -51,9 +90,8 @@ function Base.setproperty!(sys::DESys, name::Symbol, value)
     setfield!(sys, name, value)
 end
 
-function DESys(eqs, bcs, domain, ivs, dvs; ps=Symbolics.Num[], name=:system,
-    restrictions=SymRelation[],
-    history=XChain())
+function DESys(eqs, bcs, domain, ivs, dvs; ps=Symbolics.Num[],
+    restrictions=SymRelation[])
     normalized_ivs = Symbolics.Num[ivs...]
     normalized_dvs = Symbolics.Num[dvs...]
     normalized_ps = Symbolics.Num[ps...]
@@ -61,9 +99,9 @@ function DESys(eqs, bcs, domain, ivs, dvs; ps=Symbolics.Num[], name=:system,
     normalized_bcs = Symbolics.Equation[bcs...]
     normalized_domain = _as_domain(domain) # SymDomain, `key => constraints` pairs, or bare constraints
     normalized_restrictions = SymRelation[restrictions...]
-    DESys(String(name), normalized_ivs, normalized_dvs, normalized_ps,
+    DESys(normalized_ivs, normalized_dvs, normalized_ps,
         normalized_eqs, normalized_bcs, normalized_domain,
-        normalized_restrictions, history)
+        normalized_restrictions)
 end
 
 function DESys(; eqs, ivs, dvs, ps=Symbolics.Num[], bcs=Symbolics.Equation[],
@@ -78,16 +116,18 @@ _with_history(b::DESys, h::XChain) = DESys(
     eqs=b.eqs, ivs=b.ivs, dvs=b.dvs, ps=b.ps, bcs=b.bcs, domain=b.domain,
     name=b.name, restrictions=b.restrictions, history=h)
 
-struct RootSys{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symbolics.Num},P<:AbstractVector{<:Symbolics.Num},E<:AbstractVector{<:Symbolics.Equation},B<:AbstractVector{<:Symbolics.Equation}}
+is_in_domain(coord::StaticArrays.SVector, sys::DESys, include_boundary::Bool=true) =
+    is_in_domain(coord, sys.domain, include_boundary)
+
+struct RootSys
     ivs::I
     dvs::D
     ps::P
     eqs::E
     bcs::B
     domain::SymDomain
-end
 
-function RootSys(DESys)
+    function RootSys(sys::DESys)
     ivs = tuple(DESys.ivs...)
     dvs = tuple(DESys.dvs...)
     ps = tuple(DESys.ps...)
@@ -95,12 +135,13 @@ function RootSys(DESys)
     bcs = tuple(DESys.bcs...)
     RootSys(ivs, dvs, ps, eqs, bcs, DESys.domain)
 end
+end
 
 const NodeId = Int
 abstract type Node end
 abstract type Split end
 
-struct RootNode <: Node
+Base.@kwdef struct RootNode <: Node
     id::NodeId
     child_id::NodeId
     system::RootSys
@@ -113,14 +154,14 @@ Base.@kwdef struct ActiveNode <: Node
     history::XChain=XChain(XStep[])
 end
 
-struct SolvedNode <: Node
+Base.@kwdef struct SolvedNode <: Node
     id::NodeId
     parent_id::NodeId
     solution::SolvedLeaf #needs to be defined
     history::XChain
 end
 
-struct SplitNode <: Node
+Base.@kwdef struct SplitNode <: Node
     id::NodeId
     parent_id::NodeId
     child_ids::Vector{NodeId}
@@ -149,7 +190,7 @@ end
 
 struct GuardSplit <: Split
     main::Pair{Symbolics.Equation,NodeId}
-    guard::Pair{SymbolicRestriction,NodeId}
+    guard::Pair{SymRelation,NodeId}
 end
 """
 Collection of branches representing a union of solution sets.
@@ -171,6 +212,7 @@ end
 next_id!(tree::DETree) = (tree.id_counter += 1)
 next_node_id!(tree::DETree)::NodeId = next_id!(tree)
 next_constraint_id!(tree::DETree)::ConstraintId = next_id!(tree)
+next_equation_id!(tree::DETree)::EqId = next_id!(tree)
 
 function initialize_system(sys::DESys)
     root_id = 1
@@ -247,6 +289,12 @@ function complete_node!(system::DETree, node::ActiveNode, solution::SolvedLeaf)
     solved_node = SolvedNode(node.id, node.parent_id, solution, history=node.history)
     system.nodes[solved_node.id] = solved_node
     push!(system.solved, solved_node.id)
+end
+
+function is_in_domain(coord::StaticArrays.SVector, sys::DETree,
+    include_boundary::Bool=true)
+    # the system domain is a union of the domains of its branches, so a point is in the system domain if it is in any branch's domain
+    any(is_in_domain(coord, sys.nodes[leaf_id], include_boundary) for leaf_id in vcat(sys.active, sys.solved))
 end
 
 #=

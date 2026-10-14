@@ -2,7 +2,7 @@
 
 julia_version = "1.13.1"
 manifest_format = "2.1"
-project_hash = "8bf63a5ae1b785662815203c1c7a107ebcc70f6d"
+project_hash = "ce03bda6cbec71610e6aff56b53f53523d94b8cb"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -415,7 +415,7 @@ version = "7.21.4"
     Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [[deps.DiffEqCAS]]
-deps = ["DataStructures", "DomainSets", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LRUCache", "LinearAlgebra", "ModelingToolkit", "PhysicalConstants", "SpecialFunctions", "SymbolicUtils", "Symbolics", "TermInterface", "Test", "Unitful"]
+deps = ["DataStructures", "DomainSets", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LRUCache", "LinearAlgebra", "ModelingToolkit", "PhysicalConstants", "SpecialFunctions", "StaticArrays", "SymbolicUtils", "Symbolics", "TermInterface", "Test", "Unitful"]
 path = "."
 uuid = "2bd819c4-9fc0-462e-83be-792a2297597c"
 version = "0.1.0"

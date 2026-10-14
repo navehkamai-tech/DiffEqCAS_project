@@ -32,7 +32,7 @@ Base.@kwdef struct SimplificationOptions
         return new(msp, mr, mn, mdn, ed, ep, rules)
     end
 end
-struct Simplification <: XStep
+struct Simplification <: Transform
     options::SimplificationOptions
 end
 
@@ -159,7 +159,7 @@ mutable struct SimplifyContext
     headroom::Int              # remaining DAG-node allowance
     warnings::Vector{Warning}
 end
-SimplifyContext(opts) = SimplifyContext(opts, Set{Any}(), 0, String[])
+SimplifyContext(opts) = SimplifyContext(opts, Set{Any}(), 0, Warning[])
 
 #--------------------------------------------------------------------------
 # Abstraction (expression -> skeleton with dummies)
@@ -364,7 +364,7 @@ function classify_residuals!(residuals, ctx::SimplifyContext)
         else
             class = :normal
         end
-        (class === :contradiction || class === :identity) && push!(ctx.warnings, Warning(class, i, "residual $i simplified to a $(class)"))
+        (class === :contradiction || class === :identity) && push!(ctx.warnings, Warning(i, class, "residual $i simplified to a $(class)"))
     end
 end
 
@@ -429,7 +429,7 @@ function _simplify_branch_eqs(sys::DESys, options::SimplificationOptions=Simplif
     end
 
     classify_residuals!(res, ctx)
-    return rebuild_branch(sys, wrap.(res), ctx.warnings)
+    return rebuild_branch(sys, wrap.(res), ctx.warnings,sys.bcs, sys.restrictions)
 end
 
 """
@@ -445,8 +445,8 @@ separate derivation steps.
 function simplify_system(sys::DETree;
     options::SimplificationOptions=SimplificationOptions())
     return DETree([
-        _simplify_branch(branch, options)
-        for branch in sys.branches
+        _simplify_branch_eqs(a, options)
+        for a in sys.active
     ])
 end
 

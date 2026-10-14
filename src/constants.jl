@@ -9,7 +9,7 @@ struct ConstantUnit end
 
 # Helper to create a purely symbolic constant with attached data
 function define_constant(name::Symbol, val::Number, unit=Unitful.NoUnits)
-    sym = Symbolics.Sym{Real}(name)
+    sym = Symbolics.unwrap(Symbolics.variable(name))
     sym = Symbolics.setmetadata(sym, ConstantValue, val)
     sym = Symbolics.setmetadata(sym, ConstantUnit, unit)
     return Symbolics.Num(sym)
