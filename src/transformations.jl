@@ -1,12 +1,11 @@
-
 function _transform_restrictions(restrictions, transform)
-    SymRestriction[
-        SymRestriction(transform(restriction.residual), restriction.relation)
+    SymRelation[
+        SymRelation(transform(restriction.residual), restriction.relation)
         for restriction in restrictions
     ]
 end
 
-# Change parameters in place.  The return value is intentional: it supports
+# Change parameters in place. The return value is intentional: it supports
 # chaining while the `!` name makes the mutation explicit to callers.
 function change_parameters!(sys::DESys, param_mapping::Dict)
     # Pass 1: Raw substitution without the special rewriter
@@ -15,7 +14,6 @@ function change_parameters!(sys::DESys, param_mapping::Dict)
     substituted_bcs_rhs = [wrap(substitute(bc.rhs, param_mapping)) for bc in sys.bcs]
 
     # Pass 2: Extract NEW parameters directly from the expressions
-    # Leveraging your ability to pass Symbolics.Num directly into the tuple
     substituted_restrictions = [
         wrap(substitute(restriction.residual, param_mapping))
         for restriction in sys.restrictions
@@ -28,7 +26,6 @@ function change_parameters!(sys::DESys, param_mapping::Dict)
     for seq in substituted_eqs
         push!(transformed_eqs, simplify(SPECIAL_REWRITER(seq)) ~ 0)
     end
-
     transformed_bcs = Symbolics.Equation[]
     for (slhs, srhs) in zip(substituted_bcs_lhs, substituted_bcs_rhs)
         push!(transformed_bcs, simplify(SPECIAL_REWRITER(slhs)) ~ simplify(SPECIAL_REWRITER(srhs)))
@@ -36,16 +33,15 @@ function change_parameters!(sys::DESys, param_mapping::Dict)
     transformed_restrictions = _transform_restrictions(
         sys.restrictions,
         residual -> simplify(SPECIAL_REWRITER(substitute(residual, param_mapping))))
+
     new_domain = transform_domain_parameters(sys.domain, param_mapping)
-    step = PsTransform(
-        param_mapping, sys.ps, new_params)
+
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs,
         ps=new_params, bcs=transformed_bcs, domain=new_domain,
-        restrictions=transformed_restrictions,
-        history=append_derivation(sys.history, step))
+        restrictions=transformed_restrictions)
 end
 
-#helper for change_independents - recursively traverses expression trees
+# helper for change_independents - recursively traverses expression trees
 function custom_rewrite(expr, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, cache=Dict())
     expr = unwrap(expr)
 
@@ -94,13 +90,14 @@ function custom_rewrite(expr, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs, c
         cache[expr] = expr
         return expr
     end
+
     res = maketerm(typeof(expr), op, new_args, nothing)
     cache[expr] = res
     return res
 end
 
 function change_ivs!(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
-    #make sure iv_mapping is from old variables to expressions containing new variables
+    # make sure iv_mapping is from old variables to expressions containing new variables
     iv_exprs = Symbolics.Num[]
     for old_iv in sys.ivs
         if haskey(iv_mapping, old_iv)
@@ -109,20 +106,17 @@ function change_ivs!(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dic
             # Fallback: if the user omits a variable from the dictionary, keep it unchanged
             push!(iv_exprs, old_iv)
         end
-
     end
 
     replaced_old_ivs = collect(keys(iv_mapping))
     # Keep old variables that do not appear in the dictionary keys
     kept_old_ivs = setdiff(sys.ivs, replaced_old_ivs)
-
     final_ivs = vcat(kept_old_ivs, new_ivs)
     old_u = unwrap.(sys.ivs)
     new_u = unwrap.(new_ivs)
     dv_funcs = unique([get_base_op(unwrap(dv)) for dv in sys.dvs])
     params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, iv_exprs,
         [restriction.residual for restriction in sys.restrictions])))
-
     J_inv = compute_J_inv(iv_exprs, new_ivs)
     var_map = Dict(old_u .=> unwrap.(iv_exprs))
 
@@ -132,9 +126,9 @@ function change_ivs!(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dic
         lhs_u = unwrap(lhs_expr)
         rewritten_lhs = custom_rewrite(lhs_u, var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)
         simplified_lhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(rewritten_lhs))))
-
         push!(transformed_eqs, simplified_lhs ~ 0)
     end
+
     transformed_bcs = Symbolics.Equation[]
     for bc in sys.bcs
         # Transform LHS and RHS separately to maintain equations like u(0, y) ~ 1
@@ -153,16 +147,12 @@ function change_ivs!(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dic
                 old_u, new_u, dv_funcs))))))
 
     new_domains = transform_domains(sys.domain, iv_mapping, final_ivs)
-
     new_dvs = [Symbolics.wrap(custom_rewrite(unwrap(dv), var_map, J_inv, new_ivs, old_u, new_u, dv_funcs)) for dv in sys.dvs]
-    step = IvTransform(
-        iv_mapping, sys.ivs, new_ivs)
+
     _replace_branch!(sys; eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs,
         ps=params, bcs=transformed_bcs, domain=new_domains,
-        restrictions=transformed_restrictions,
-        history=append_derivation(sys.history, step))
+        restrictions=transformed_restrictions)
 end
-
 
 function substitute_dvs(expr, old_dvs, dv_exprs, ivs, cache=Dict())
     expr = unwrap(expr)
@@ -196,8 +186,8 @@ function substitute_dvs(expr, old_dvs, dv_exprs, ivs, cache=Dict())
         while isequal(SU.operation(curr), getindex)
             curr = SU.arguments(curr)[1]
         end
-        args = SU.arguments(curr)
 
+        args = SU.arguments(curr)
         arg_sub = Dict(wrap.(ivs) .=> wrap.(args))
         res = unwrap(substitute(wrap(dv_exprs[idx]), arg_sub))
         cache[expr] = res
@@ -218,10 +208,8 @@ function substitute_dvs(expr, old_dvs, dv_exprs, ivs, cache=Dict())
     return res
 end
 
-
-
 function change_dvs!(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
-    # 1. Align expressions with the existing dvendency order
+    # 1. Align expressions with the existing dependency order
     dv_exprs = Symbolics.Num[]
     for old_dv in sys.dvs
         if haskey(dv_mapping, old_dv)
@@ -229,12 +217,10 @@ function change_dvs!(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
         else
             push!(dv_exprs, old_dv)
         end
-
     end
 
     replaced_old_dvs = collect(keys(dv_mapping))
     kept_old_dvs = setdiff(sys.dvs, replaced_old_dvs)
-
     final_dvs = vcat(kept_old_dvs, new_dvs)
 
     ivs = unwrap.(sys.ivs)
@@ -252,10 +238,8 @@ function change_dvs!(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
         # Traverse and forcefully substitute inside Differentials
         substituted_lhs = substitute_dvs(lhs_expr, old_dvs, u_dv_exprs, ivs)
         simplified_lhs = simplify(SPECIAL_REWRITER(expand_derivatives(wrap(substituted_lhs))))
-
         push!(transformed_eqs, simplified_lhs ~ 0)
     end
-
     transformed_bcs = Symbolics.Equation[]
     for bc in sys.bcs
         substituted_lhs = substitute_dvs(unwrap(bc.lhs), old_dvs, u_dv_exprs, ivs)
@@ -271,44 +255,60 @@ function change_dvs!(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
         residual -> simplify(SPECIAL_REWRITER(expand_derivatives(wrap(
             substitute_dvs(unwrap(residual), old_dvs, u_dv_exprs, ivs))))))
 
-    # Passing sys.params assuming you want to retain the original params block manually
-    mapping = Dict(old_dvs .=> dv_exprs)
-    step = DvTransform(mapping, sys.dvs, final_dvs)
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs,
         ps=params, bcs=transformed_bcs, domain=sys.domain,
-        restrictions=transformed_restrictions,
-        history=append_derivation(sys.history, step))
+        restrictions=transformed_restrictions)
 end
 
 # Collection-level hooks apply the transformation independently to every
-# branch while retaining the identity and bookkeeping of the system object.
+# active branch while recording history on the ActiveNode.
 function change_parameters!(sys::DETree, param_mapping::Dict)
-    foreach(branch -> change_parameters!(branch, param_mapping), sys.branches)
+    for id in sys.active
+        node = sys.nodes[id]
+        if node isa ActiveNode
+            old_ps = copy(node.system.ps)
+            change_parameters!(node.system, param_mapping)
+            step = PsTransform(param_mapping, old_ps, node.system.ps)
+            sys.nodes[id] = ActiveNode(id=node.id, parent_id=node.parent_id, system=node.system, history=append_transform(node.history, step))
+        end
+    end
     sys
 end
 
-function change_ivs!(
-    sys::DETree, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict,
-)
-    foreach(branch -> change_ivs!(branch, new_ivs, iv_mapping), sys.branches)
+function change_ivs!(sys::DETree, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict)
+    for id in sys.active
+        node = sys.nodes[id]
+        if node isa ActiveNode
+            old_ivs = copy(node.system.ivs)
+            change_ivs!(node.system, new_ivs, iv_mapping)
+            step = IvTransform(iv_mapping, old_ivs, new_ivs)
+            sys.nodes[id] = ActiveNode(id=node.id, parent_id=node.parent_id, system=node.system, history=append_transform(node.history, step))
+        end
+    end
     sys
 end
 
-function change_dvs!(
-    sys::DETree, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict,
-)
-    foreach(branch -> change_dvs!(branch, new_dvs, dv_mapping), sys.branches)
+function change_dvs!(sys::DETree, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict)
+    for id in sys.active
+        node = sys.nodes[id]
+        if node isa ActiveNode
+            old_dvs = copy(node.system.dvs)
+            change_dvs!(node.system, new_dvs, dv_mapping)
+            step = DvTransform(dv_mapping, old_dvs, node.system.dvs)
+            sys.nodes[id] = ActiveNode(id=node.id, parent_id=node.parent_id, system=node.system, history=append_transform(node.history, step))
+        end
+    end
     sys
 end
 
-# Keep the established names as mutating aliases.  Callers that need a
-# non-mutating transformation should explicitly copy the branch/system first.
+# Keep the established names as mutating aliases.
 change_parameters(sys::DESys, param_mapping::Dict) =
     change_parameters!(sys, param_mapping)
 change_ivs(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict) =
     change_ivs!(sys, new_ivs, iv_mapping)
 change_dvs(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dict) =
     change_dvs!(sys, new_dvs, dv_mapping)
+
 change_parameters(sys::DETree, param_mapping::Dict) =
     change_parameters!(sys, param_mapping)
 change_ivs(sys::DETree, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dict) =

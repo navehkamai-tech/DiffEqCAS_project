@@ -1,4 +1,41 @@
 
+function replace_constants(ex)
+    # Dynamically fetch all exported symbols from Constants (ignoring the module name itself)
+    cas_symbols = filter(x -> x !== :Constants, names(Constants))
+
+    if ex isa Symbol
+        if ex in cas_symbols
+            # Replace the naked symbol with a safe, fully qualified reference
+            return GlobalRef(Constants, ex)
+        end
+    elseif ex isa Expr
+        # Prevent replacing symbols in property access, e.g., my_struct.pi
+        if ex.head == :.
+            return Expr(:., replace_constants(ex.args[1]), ex.args[2])
+        end
+        # Recursively apply to all arguments in the expression
+        return Expr(ex.head, map(replace_constants, ex.args)...)
+    end
+
+    return ex
+end
+
+"""
+    @expr
+
+replaces constants in the inputted expression with safe versions
+regular constants like Base.MathConstants.π combine through arithmetic into floats, 
+i.e. typeof(π+1) gives Float64. 
+the macro protects all constants that the system recognizes within the inputted expression so that they remain as symbols.
+"""
+macro expr(ex)
+    # Walk the AST, replace constants, and escape the result for the caller's scope
+    replaced_ex = wrap(replace_constants(unwrap(ex)))
+    return esc(replaced_ex)
+end
+
+export @expr
+
 #symbolic rule predicate helper functions
 notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
 is_pos_param(var) = notavariable(var) && factor_sign(var) == positive
@@ -11,6 +48,7 @@ is_negative(x) = factor_sign(x)==negative
 is_divisible(x) = nothing #? needs to be filled in
 is_integer(x) = x isa Integer
 is_domain(x) = x isa SymDomain
+is_rational(x) = x isa Rational
 
 
 # Rules are grouped by required assumptions and pipeline stage.  The
@@ -26,8 +64,14 @@ const normalization_rules = [
     @rule(sec(~x) => cos(~x)^-1),
     @rule(csc(~x) => sin(~x)^-1),
     @rule(cot(~x) => cos(~x) * sin(~x)^-1),
+    @rule(atan(~x) => asin((~x)/((~x)^2+1)^(1//2))),
+    @rule(asec(~x) => acos(1/(~x))),
+    @rule(acsc(~x) => asin(1/(~x))),
+    @rule(acot(~x) => sign(~x)*asin(1/((~x)^2+1)^(1//2))),
+    # Hyperbolic Trig Normalization
     # 3. Exact Rational Normalization
-    @rule(~n::AbstractFloat => rationalize(~n))
+    @rule(~n::AbstractFloat => rationalize(~n)),
+    @rule(inv(~n::is_rational) => simplify(1//(~n)))
 ]
 
 const NORMALIZER = SU.Postwalk(SU.PassThrough(SU.Chain(normalization_rules)))
@@ -62,12 +106,17 @@ const ABSOLUTE_VALUE_RULES = [
     @rule((abs(~x)^(2*~n)) => (~x)^(2*~n)),
     @rule(abs(~x::is_positive) => ~x),
     @rule(abs(~x::is_negative) => -~x),
+    # need to add rules here for the sign function
 ]
 const TRIGONOMETRIC_RULES = [
-    @rule(sin(~x+2*π) => sin(~x)),
-    @rule(sin(~x+2*π*~n::is_integer) => sin(~x)),
-    @rule(cos(~x+2*π) => cos(~x)),
-    @rule(cos(~x+2*π*~n::is_integer) => cos(~x)),
+    @rule(sin(~x+2*Constants.π
+    ) => sin(~x)),
+    @rule(sin(~x+2 * Constants.π
+        * ~n::is_integer) => sin(~x)),
+    @rule(cos(~x+2*Constants.π
+    ) => cos(~x)),
+    @rule(cos(~x+2 * Constants.π
+        * ~n::is_integer) => cos(~x)),
     @rule(sin(~x)^2 => 1//2-1//2*cos(2*~x)),
     @rule(cos(~x)^2 => 1//2+1//2*cos(2*~x)),
     @rule(tan(~x) => sin(~x)/cos(~x))

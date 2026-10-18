@@ -53,7 +53,7 @@ change_dvs, change_ivs, change_parameters
 simplify_system, group_coefficients, custom_rewrite, common_divisors, factor_divisibility
 
 # Utilities
-get_base_op, get_sign
+get_base_op, factor_sign
 
 # Special Functions
 Dirac, Heaviside, Restrict, SPECIAL_REWRITER

@@ -1,43 +1,4 @@
 
-@enum SolutionForm EXPLICIT IMPLICIT PARAMETRIC
-@enum SolutionRole GENERAL PARTICULAR SINGULAR
-
-"""
-    SolutionFamily
-Encapsulates the mathematical equations of the solved family and its remaining degrees of freedom.
-"""
-Base.@kwdef struct SolutionFamily
-    form::SolutionForm = EXPLICIT
-    role::SolutionRole = GENERAL
-    relations::Vector{SymEquation} = SymEquation[]  # The solutions (SeriesSum lives inside these!)
-    dofs::Vector{Symbolics.Num} = Symbolics.Num[]   # Unified DoFs: C₁, A(n), F(x - c*t)
-    dof_constraints::Vector{SymEquation} = SymEquation[] # Optional ties between DoFs, e.g. ω ~ α*k^2
-end
-
-"""
-    SolvedLeaf
-Mirrors `DESys` for a completed leaf node: holds the system context,
-any unapplied BCs, and the `SolutionFamily`.
-"""
-Base.@kwdef struct SolvedLeaf{
-    I<:AbstractVector{<:Symbolics.Num},
-    D<:AbstractVector{<:Symbolics.Num},
-    P<:AbstractVector{<:Symbolics.Num},
-    B<:AbstractVector{<:Symbolics.Equation}
-}
-    # Core System Context (matches DESys layout directly)
-    ivs::I
-    dvs::D
-    ps::P
-    bcs::B                                           # Unapplied BCs (emptied as DoFs are eliminated)
-    domain::SymDomain
-    restrictions::Vector{SymRelation} = SymRelation[]
-    history::XChain = XChain(XStep[])
-
-    # The Solved Payload
-    family::SolutionFamily
-end
-
 abstract type Transform end
 
 struct XStep
@@ -84,6 +45,46 @@ mutable struct DESys{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symb
     restrictions::Vector{SymRelation}
 end
 
+@enum SolutionForm EXPLICIT IMPLICIT PARAMETRIC
+@enum SolutionRole GENERAL PARTICULAR SINGULAR
+
+"""
+    SolutionFamily
+Encapsulates the mathematical equations of the solved family and its remaining degrees of freedom.
+"""
+Base.@kwdef struct SolutionFamily
+    form::SolutionForm = EXPLICIT
+    role::SolutionRole = GENERAL
+    relations::Vector{SymEquation} = SymEquation[]  # The solutions (SeriesSum lives inside these!)
+    dofs::Vector{Symbolics.Num} = Symbolics.Num[]   # Unified DoFs: C₁, A(n), F(x - c*t)
+    dof_constraints::Vector{SymEquation} = SymEquation[] # Optional ties between DoFs, e.g. ω ~ α*k^2
+end
+
+"""
+    SolvedLeaf
+Mirrors `DESys` for a completed leaf node: holds the system context,
+any unapplied BCs, and the `SolutionFamily`.
+"""
+Base.@kwdef struct SolvedLeaf{
+    I<:AbstractVector{<:Symbolics.Num},
+    D<:AbstractVector{<:Symbolics.Num},
+    P<:AbstractVector{<:Symbolics.Num},
+    B<:AbstractVector{<:Symbolics.Equation}
+}
+    # Core System Context (matches DESys layout directly)
+    ivs::I
+    dvs::D
+    ps::P
+    bcs::B                                           # Unapplied BCs (emptied as DoFs are eliminated)
+    domain::SymDomain
+    restrictions::Vector{SymRelation} = SymRelation[]
+    history::XChain = XChain(XStep[])
+
+    # The Solved Payload
+    family::SolutionFamily
+end
+
+
 function Base.setproperty!(sys::DESys, name::Symbol, value)
     # Pavings live on the domain's factors, so replacing the domain needs no invalidation.
     name === :domain && (value = _as_domain(value))
@@ -119,7 +120,7 @@ _with_history(b::DESys, h::XChain) = DESys(
 is_in_domain(coord::StaticArrays.SVector, sys::DESys, include_boundary::Bool=true) =
     is_in_domain(coord, sys.domain, include_boundary)
 
-struct RootSys
+struct RootSys{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symbolics.Num},P<:AbstractVector{<:Symbolics.Num},E<:AbstractVector{<:SymEquation},B<:AbstractVector{<:Symbolics.Equation}}
     ivs::I
     dvs::D
     ps::P
