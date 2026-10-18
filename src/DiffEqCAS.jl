@@ -75,12 +75,11 @@ include("types.jl")
 # ---------------------------------------------------------------------------
 include("domain_algebra.jl")
 include("domain_paving.jl")
+include("system_ops.jl")
 
 # ---------------------------------------------------------------------------
-# Layer 3: System Operations, Derivation Tree, Units & Display
+# Layer 3: Independent modules (currently only dependent on types.jl)
 # ---------------------------------------------------------------------------
-include("system_ops.jl")
-include("derivation_tree.jl")
 include("units.jl")
 include("display.jl")
 
@@ -91,11 +90,14 @@ include("divisibility.jl")
 include("symbolic_rules.jl")
 
 # ---------------------------------------------------------------------------
-# Layer 5: Simplification, Transformations & Special Algorithms
+# Layer 5: Simplification, Transformations
 # ---------------------------------------------------------------------------
 include("simplification.jl")
 include("transformations.jl")
+
+# final part, governs the system as a whole
 include("special_algorithms.jl")
+include("derivation_tree.jl")
 
 function __init__()
     Unitful.register(DiffEqCAS)
