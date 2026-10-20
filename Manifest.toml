@@ -2,7 +2,7 @@
 
 julia_version = "1.13.1"
 manifest_format = "2.1"
-project_hash = "d6c81fbc2d7fec8051ee58ae92f6d064eceeb95c"
+project_hash = "98d18d17cae9babe3eb2d65a15c90d70aeca7d01"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -234,13 +234,6 @@ registries = "General"
 uuid = "4e9b3aee-d8a1-5a3d-ad8b-7d824db253f0"
 version = "1.0.1+0"
 
-[[deps.Calculus]]
-deps = ["LinearAlgebra"]
-git-tree-sha1 = "9cb23bbb1127eefb022b022481466c0f1127d430"
-registries = "General"
-uuid = "49dc2e85-a5d0-5ad3-a950-438e2897f1b9"
-version = "0.5.2"
-
 [[deps.Combinatorics]]
 git-tree-sha1 = "08c8b6831dc00bfea825826be0bc8336fc369860"
 registries = "General"
@@ -415,7 +408,7 @@ version = "7.21.4"
     Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [[deps.DiffEqCAS]]
-deps = ["DataStructures", "DomainSets", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LRUCache", "LinearAlgebra", "ModelingToolkit", "PhysicalConstants", "SpecialFunctions", "StaticArrays", "SymbolicLimits", "SymbolicUtils", "Symbolics", "TermInterface", "Test", "Unitful"]
+deps = ["DataStructures", "DomainSets", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LRUCache", "LinearAlgebra", "ModelingToolkit", "SpecialFunctions", "StaticArrays", "SymbolicLimits", "SymbolicUtils", "Symbolics", "TermInterface", "Test", "Unitful"]
 path = "."
 uuid = "2bd819c4-9fc0-462e-83be-792a2297597c"
 version = "0.1.0"
@@ -1223,29 +1216,6 @@ weakdeps = ["SparseArrays"]
     [deps.MaybeInplace.extensions]
     MaybeInplaceSparseArraysExt = "SparseArrays"
 
-[[deps.Measurements]]
-deps = ["Calculus", "LinearAlgebra", "Printf"]
-git-tree-sha1 = "cb47f69a1cab9dcec7ff4a5d6e163410d6905866"
-registries = "General"
-uuid = "eff96d63-e80a-5855-80a2-b1b0885c5ab7"
-version = "2.14.1"
-
-    [deps.Measurements.extensions]
-    MeasurementsBaseTypeExt = "BaseType"
-    MeasurementsJunoExt = "Juno"
-    MeasurementsMakieExt = "Makie"
-    MeasurementsRecipesBaseExt = "RecipesBase"
-    MeasurementsSpecialFunctionsExt = "SpecialFunctions"
-    MeasurementsUnitfulExt = "Unitful"
-
-    [deps.Measurements.weakdeps]
-    BaseType = "7fbed51b-1ef5-4d67-9085-a4a9b26f478c"
-    Juno = "e5e0dc1b-0480-54bc-9374-aad01c23163d"
-    Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
-    RecipesBase = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
-    SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
-    Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
-
 [[deps.Missings]]
 deps = ["DataAPI"]
 git-tree-sha1 = "ec4f7fbeab05d7747bdf98eb74d130a2a2ed298d"
@@ -1498,13 +1468,6 @@ weakdeps = ["StatsBase"]
 
     [deps.PDMats.extensions]
     StatsBaseExt = "StatsBase"
-
-[[deps.PhysicalConstants]]
-deps = ["Measurements", "Roots", "Unitful"]
-git-tree-sha1 = "3260db49a2599ed83d649b2c3043f1733c3d2895"
-registries = "General"
-uuid = "5ad8b20f-a522-5ce9-bfc9-ddf1d5bda6ab"
-version = "0.2.5"
 
 [[deps.Pkg]]
 deps = ["Artifacts", "Dates", "Downloads", "FileWatching", "LibGit2", "Libdl", "Logging", "Markdown", "Printf", "Random", "SHA", "TOML", "Tar", "UUIDs", "Zstd_jll", "p7zip_jll"]

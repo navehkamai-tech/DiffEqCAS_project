@@ -8,23 +8,6 @@ _additive_terms(expr) = collect(terms(unwrap(expr)))
 
 _multiplicative_factors(expr) = collect(Symbolics.factors(unwrap(expr)))
 
-function _res_to_eq(res)
-    if res isa Symbolics.Num || res isa Expr
-        return Symbolics.Equation(wrap(res), 0)
-    end
-    throw(ArgumentError("Cannot convert $(typeof(res)) to an equation"))
-end
-
-function _find_matches(arr_A, arr_B)
-    matches = []
-    for (i, j) in zip(1:length(arr_A), 1:length(arr_B))
-        if arr_A[i]==arr_B[j]
-            push!(matches, (i, j))
-        end
-    end
-    return matches[]
-end
-
 function _push_unique!(arr, new_vals)
     for new_val in new_vals
         _contains_equal(arr, new_val) ? nothing : push!(arr, new_val)
@@ -65,21 +48,6 @@ function chain_rule(J_inv, old_var_idx, new_vars, arg, order=1)
     return unwrap(term)
 end
 
-function _has_depvar_or_diff(expr)
-    # get_variables extracts [x, f(x), D(f(x))] and ignores standard math wrappers like sin()
-    vars = Symbolics.get_variables(expr)
-
-    for v in vars
-        v_un = Symbolics.unwrap(v)
-        if SU.iscall(v_un)
-            op = SU.operation(v_un)
-            if op isa Differential || op isa SU.Sym
-                return true
-            end
-        end
-    end
-    return false
-end
 #parameter helper
 function extract_parameters(list::Tuple)
     symbols = Symbolics.Num[]

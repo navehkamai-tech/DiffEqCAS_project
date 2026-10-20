@@ -633,21 +633,6 @@ function HC4Revise(box::IntervalBox, variables::Union{AbstractVector,Tuple}, rel
     return contracted
 end
 
-# Keep _domain_interval_value and _domain_relation_status for any external callers
-function _domain_interval_value(expr, variables, box)
-    tape = compile_hc4(SymRelation(wrap(expr), :<=), variables)
-    workspace = Vector{_BI}(undef, tape.tape_len)
-    for i in 1:length(variables)
-        workspace[i] = _bi(box[i])
-    end
-    return _execute_forward!(tape, workspace)
-end
-
-function _domain_relation_status(constraint::DomConstraint, variables, box)
-    val = _domain_interval_value(constraint.relation.residual, variables, box)
-    return _eval_relation_status(_get_relation(constraint.relation), val)
-end
-
 const ROI = Ref{Float64}(10000.0)
 const tolerance = Ref{Float64}(0.01)
 
@@ -674,10 +659,10 @@ function shrink_bounds!(bounds, constraint::DomConstraint)
     num = SU.unwrap_const(Symbolics.unwrap(substitute(expr, var => 0) / coeff))
     num isa Real || return bounds
     if (((op === <) || (op === <=)) && (coeff_value > 0)) ||
-       (((op === >) || (op === >=)) && (coeff_value < 0))
+        (((op === >) || (op === >=)) && (coeff_value < 0))
         bounds[var][2] = min(-num, bounds[var][2])
     elseif (((op === <) || (op === <=)) && (coeff_value < 0)) ||
-           (((op === >) || (op === >=)) && (coeff_value > 0))
+        (((op === >) || (op === >=)) && (coeff_value > 0))
         bounds[var][1] = max(-num, bounds[var][1])
     end
     return bounds
@@ -740,13 +725,13 @@ function _pave_constraints(box::IntervalBox{N,T}, constraints, variables, epsilo
     return inner, boundary
 end
 
-# Pave one factor: the box search only ever sees that factor's variables, so
-# the cost is exponential in the factor's dimension, not the domain's.
-function _pave_factor(domain::SymDomain, factor::DomBlock)
-    variables = collect(factor.variables)
+# Pave one block: the box search only ever sees that block's variables, so
+# the cost is exponential in the block's dimension, not the domain's.
+function _pave_block(domain::SymDomain, block::DomBlock)
+    variables = block.variables
     bounds = Dict{Any,Vector{Float64}}(v => [-ROI[], ROI[]] for v in variables)
     collected_constraints = DomConstraint[]
-    for c in constraints_of(domain, factor)
+    for c in constraints_of(domain, block)
         push!(collected_constraints, c)
         shrink_bounds!(bounds, c)
     end
@@ -758,18 +743,18 @@ function _pave_factor(domain::SymDomain, factor::DomBlock)
 end
 
 """
-    factor_paving!(domain, factor)
+    block_paving!(domain, block)
 
-The factor's paving, computed on first use and stored on the factor. `factor`
+The block's paving, computed on first use and stored on the block. `block`
 must belong to `domain`. A stored paving made under different `ROI`/`tolerance`
 settings is recomputed.
 """
-function factor_paving!(domain::SymDomain, factor::DomBlock)
-    paving = factor.paving
+function block_paving!(domain::SymDomain, block::DomBlock)
+    paving = block.paving
     if paving === nothing || paving.roi < ROI[] || paving.tolerance > tolerance[]
-        inner, boundary = _pave_factor(domain, factor)
+        inner, boundary = _pave_block(domain, block)
         paving = Paving(inner, boundary, ROI[], tolerance[])
-        factor.paving = paving
+        block.paving = paving
     end
     return paving
 end
@@ -777,23 +762,21 @@ end
 """
     domain_pavings(domain)
 
-One `Paving` per factor, in factor order, computed lazily and cached on the
-factors. The domain is the product of these, which is never expanded:
-membership and feasibility are answered factor by factor.
+One `Paving` per block, in block order, computed lazily and cached on the
+blocks. The domain is the product of these, which is never expanded:
+membership and feasibility are answered block by block.
 """
-domain_pavings(domain::SymDomain) = Paving[factor_paving!(domain, f) for f in domain.factors]
+domain_pavings(domain::SymDomain) = Paving[block_paving!(domain, b) for b in domain.blocks]
 
 constraints_to_domain(domain::SymDomain) = isempty(domain) ? nothing : domain_pavings(domain)
-# raw `key => constraints` pairs (disjoint keys)
-constraints_to_domain(domain_pairs) = constraints_to_domain(add_constraints(domain_pairs, ()))
 
-# `coord` is ordered like `domain.variables`; each factor sees only its slice.
+# `coord` is ordered like `domain.variables`; each block sees only its slice.
 function _in_pavings(coord, domain::SymDomain, pavings, include_boundary::Bool)
     length(coord) == length(domain.variables) ||
         throw(DimensionMismatch("coords must have the same dimension as domain"))
     offset = 0
-    for (factor, paving) in zip(domain.factors, pavings)
-        n = length(factor.variables)
+    for (block, paving) in zip(domain.blocks, pavings)
+        n = length(block.variables)
         sub = StaticArrays.SVector{n}(ntuple(i -> coord[offset+i], n))
         offset += n
         any(sub ∈ box for box in paving.interior) && continue
@@ -803,20 +786,20 @@ function _in_pavings(coord, domain::SymDomain, pavings, include_boundary::Bool)
     return true
 end
 
-function is_in_domain(coord::StaticArrays.SVector, domain::SymDomain, include_boundary::Bool=true)
+function is_in_domain(coord::StaticArrays.SVector, domain::SymDomain; include_boundary::Bool=true)
     isempty(domain) && return false
     return _in_pavings(coord, domain, domain_pavings(domain), include_boundary)
 end
 
 # raw `key => constraints` pairs
-is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector, include_boundary::Bool=true) =
-    is_in_domain(coord, add_constraints(domain_constraints, ()), include_boundary)
+is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector; include_boundary::Bool=true) =
+    is_in_domain(coord, _as_domain(domain_constraints), include_boundary)
 
 """
     constraints_satisfiable(constraints, domain, include_boundary=true)
 
 Check whether `constraints` can be added to `domain` without emptying it. Only
-the factors the new constraints touch are re-paved; untouched factors are
+the blocks the new constraints touch are re-paved; untouched blocks are
 unchanged by definition.
 """
 function constraints_satisfiable(
@@ -826,16 +809,18 @@ function constraints_satisfiable(
 )
     new_constraints = constraints isa AbstractVector || constraints isa Tuple ?
                       constraints : (constraints,)
-    combined = add_constraints(domain, new_constraints)
-    touched = Any[]
-    for raw in new_constraints
-        append!(touched, constraint_variables(_as_constraint(raw)))
-    end
-    for factor in combined.factors
-        any(v -> _contains_equal(factor.variables, v), touched) || continue
-        inner, boundary = _pave_factor(combined, factor)
-        feasible = include_boundary ? (!isempty(inner) || !isempty(boundary)) : !isempty(inner)
-        feasible || return false
+    combined = add_constraints(domain, new_constraints; throw_on_infeasible=false)
+    combined === nothing && return false
+    if !include_boundary
+        touched = Any[]
+        for raw in new_constraints
+            append!(touched, constraint_variables(_as_constraint(raw)))
+        end
+        for block in combined.blocks
+            any(v -> _contains_equal(block.variables, v), touched) || continue
+            inner, _ = _pave_block(combined, block)
+            isempty(inner) && return false
+        end
     end
     return true
 end

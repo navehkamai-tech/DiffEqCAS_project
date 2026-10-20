@@ -18,8 +18,9 @@ using DataStructures
 using TermInterface
 using Base.MathConstants
 using StaticArrays
+using Base.Threads
 
-import Symbolics: unwrap, wrap, jacobian, simplify, substitute
+import Symbolics: unwrap, wrap, jacobian, simplify, substitute, get_variables
 import SymbolicUtils as SU
 import SymbolicUtils: maketerm, @rule, @acrule
 import Base.MathConstants as MC
@@ -28,7 +29,7 @@ import Base.MathConstants as MC
 # Exports
 # ---------------------------------------------------------------------------
 # Core Types & IDs
-export NodeId, ConstraintId, EqId, UNASSIGNED_ID
+export NodeId, ConstraintId, EqId
 export SymRelation, DomConstraint, Paving, DomBlock, SymDomain
 export SymEquation, SeriesTerm, SeriesSum
 export Locus, Face, Explicit, Interior, Limit, ExhaustiveLimit, BoundaryCondition
@@ -42,9 +43,9 @@ export ConstraintEvidence, EvidenceDomain
 
 # Domain Operations & Paving
 export domain_variables, domain_components, all_constraints, constraint_ids
-export find_constraint, constraints_of, factor_of, assign_ids, same_domain
+export find_constraint, constraints_of, block_of, domain_evidence, relation_status, same_domain
 export domain_product, add_constraints, rewrite_constraints, domain_from_constraints
-export subdomain, share_factors, is_in_domain, constraints_satisfiable
+export subdomain, share_blocks, is_in_domain, constraints_satisfiable
 export HC4Revise, compile_hc4
 
 # System, Tree & Display Operations
@@ -52,7 +53,7 @@ export initialize_system, new_node!, split_node!, complete_node!
 export display_pde, display_expr
 
 # Rules, Divisibility & Simplification
-export @expr, Dirac, Heaviside, SPECIAL_REWRITER, normalize_expr
+export @expr, Dirac, Heaviside, SPECIAL_REWRITER, normalize_expr, D
 export factor_evidence, factor_sign, factor_divisibility, common_divisors
 export simplify_system
 
@@ -71,10 +72,12 @@ include("utils.jl")
 include("types.jl")
 
 # ---------------------------------------------------------------------------
-# Layer 2: Domains (Symbolic Topology & Paving Engine)
+# Layer 2: Relations, Domain & Feasibility (Symbolic Topology & Paving Engine)
 # ---------------------------------------------------------------------------
+include("relations.jl")
 include("domain_algebra.jl")
 include("domain_paving.jl")
+include("feasibility.jl")
 include("system_ops.jl")
 
 # ---------------------------------------------------------------------------
@@ -86,7 +89,6 @@ include("display.jl")
 # ---------------------------------------------------------------------------
 # Layer 4: Domain-Aware Inference & Symbolic Rules
 # ---------------------------------------------------------------------------
-include("divisibility.jl")
 include("symbolic_rules.jl")
 
 # ---------------------------------------------------------------------------

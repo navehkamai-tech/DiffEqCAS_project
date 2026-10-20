@@ -1,7 +1,7 @@
-function _transform_restrictions(restrictions, transform)
+function _transform_relations(relations, transform)
     SymRelation[
-        SymRelation(transform(restriction.residual), restriction.relation)
-        for restriction in restrictions
+        SymRelation(transform(rel.residual), rel.relation)
+        for rel in relations
     ]
 end
 
@@ -14,12 +14,12 @@ function change_parameters!(sys::DESys, param_mapping::Dict)
     substituted_bcs_rhs = [wrap(substitute(bc.rhs, param_mapping)) for bc in sys.bcs]
 
     # Pass 2: Extract NEW parameters directly from the expressions
-    substituted_restrictions = [
-        wrap(substitute(restriction.residual, param_mapping))
-        for restriction in sys.restrictions
+    substituted_relations = [
+        wrap(substitute(rel.residual, param_mapping))
+        for rel in sys.restrictions
     ]
     exprs_tuple = Tuple(vcat(substituted_eqs, substituted_bcs_lhs,
-        substituted_bcs_rhs, substituted_restrictions))
+        substituted_bcs_rhs, substituted_relations))
     new_params = extract_parameters(exprs_tuple)
 
     transformed_eqs = Symbolics.Equation[]
@@ -30,7 +30,7 @@ function change_parameters!(sys::DESys, param_mapping::Dict)
     for (slhs, srhs) in zip(substituted_bcs_lhs, substituted_bcs_rhs)
         push!(transformed_bcs, simplify(SPECIAL_REWRITER(slhs)) ~ simplify(SPECIAL_REWRITER(srhs)))
     end
-    transformed_restrictions = _transform_restrictions(
+    transformed_relations = _transform_relations(
         sys.restrictions,
         residual -> simplify(SPECIAL_REWRITER(substitute(residual, param_mapping))))
 
@@ -38,7 +38,7 @@ function change_parameters!(sys::DESys, param_mapping::Dict)
 
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=sys.dvs,
         ps=new_params, bcs=transformed_bcs, domain=new_domain,
-        restrictions=transformed_restrictions)
+        restrictions=transformed_relations)
 end
 
 # helper for change_independents - recursively traverses expression trees
@@ -116,7 +116,7 @@ function change_ivs!(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dic
     new_u = unwrap.(new_ivs)
     dv_funcs = unique([get_base_op(unwrap(dv)) for dv in sys.dvs])
     params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, iv_exprs,
-        [restriction.residual for restriction in sys.restrictions])))
+        [rel.residual for rel in sys.restrictions])))
     J_inv = compute_J_inv(iv_exprs, new_ivs)
     var_map = Dict(old_u .=> unwrap.(iv_exprs))
 
@@ -140,7 +140,7 @@ function change_ivs!(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dic
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
-    transformed_restrictions = _transform_restrictions(
+    transformed_relations = _transform_relations(
         sys.restrictions,
         residual -> simplify(SPECIAL_REWRITER(expand_derivatives(wrap(
             custom_rewrite(unwrap(residual), var_map, J_inv, new_ivs,
@@ -151,7 +151,7 @@ function change_ivs!(sys::DESys, new_ivs::Vector{Symbolics.Num}, iv_mapping::Dic
 
     _replace_branch!(sys; eqs=transformed_eqs, ivs=final_ivs, dvs=new_dvs,
         ps=params, bcs=transformed_bcs, domain=new_domains,
-        restrictions=transformed_restrictions)
+        restrictions=transformed_relations)
 end
 
 function substitute_dvs(expr, old_dvs, dv_exprs, ivs, cache=Dict())
@@ -228,7 +228,7 @@ function change_dvs!(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
     u_dv_exprs = unwrap.(dv_exprs)
 
     params = extract_parameters(Tuple(vcat(sys.eqs, sys.bcs, dv_exprs,
-        [restriction.residual for restriction in sys.restrictions])))
+        [rel.residual for rel in sys.restrictions])))
 
     transformed_eqs = Symbolics.Equation[]
     for eq in sys.eqs
@@ -250,14 +250,14 @@ function change_dvs!(sys::DESys, new_dvs::Vector{Symbolics.Num}, dv_mapping::Dic
 
         push!(transformed_bcs, simplified_lhs ~ simplified_rhs)
     end
-    transformed_restrictions = _transform_restrictions(
+    transformed_relations = _transform_relations(
         sys.restrictions,
         residual -> simplify(SPECIAL_REWRITER(expand_derivatives(wrap(
             substitute_dvs(unwrap(residual), old_dvs, u_dv_exprs, ivs))))))
 
     _replace_branch!(sys; eqs=transformed_eqs, ivs=sys.ivs, dvs=final_dvs,
         ps=params, bcs=transformed_bcs, domain=sys.domain,
-        restrictions=transformed_restrictions)
+        restrictions=transformed_relations)
 end
 
 # Collection-level hooks apply the transformation independently to every

@@ -1,3 +1,10 @@
+#=
+the goals for this file:
+a) have custom Latexify and LaTeXStrings recipies (unless of course I end up displaying in a different way). 
+particularly for derivatives, I think I want ∂-notation 
+b) have comprehensive error messages for when a system fails mathematically, that trace back the derivation history and highlight the potential sources of error
+c) display systems coherently. there's a lot of information to display in a system, and I want to prevent it from being displayed as a jumbled mess.
+=#
 
 function display_expr(expr)
     # Unwrap to access the raw SU tree

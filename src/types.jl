@@ -7,12 +7,13 @@ Drawn from the same per-tree counter as every other Id (see `next_id!`), so it i
 unique across the whole tree, is inherited unchanged by child nodes, and survives
 rewrites of the constraint's expression (change of variables, simplification).
 Boundary conditions refer to a constraint by this Id, never by its position.
-`UNASSIGNED_ID` marks an item that has not been registered with a tree yet; see `assign_ids`.
 """
 const NodeId = Int
 const ConstraintId = Int
 const EqId = Int
-const UNASSIGNED_ID = 0
+
+const _GLOBAL_ID_COUNTER = Threads.Atomic{Int}(0)
+fresh_id() = Threads.atomic_add!(_GLOBAL_ID_COUNTER, 1) + 1
 
 # ===========================================================================
 # 2. Symbolic Relations & Equations
@@ -20,9 +21,7 @@ const UNASSIGNED_ID = 0
 """
     SymRelation(residual, relation)
 
-A branch-local relation between a symbolic residual and zero. Equalities are
-represented by the branch equations; restrictions represent only non-equality
-relations used to describe a branch cell.
+A relation between a symbolic residual and zero. 
 """
 struct SymRelation
     residual::Symbolics.Num
@@ -32,7 +31,8 @@ struct SymRelation
         relation_symbol = relation isa Symbol ? relation : Symbol(string(relation))
         relation_symbol in (Symbol("!="), :>, Symbol(">="), :<, Symbol("<="), Symbol("==")) ||
             throw(ArgumentError("unsupported symbolic restriction relation: $relation"))
-        new(wrap(residual), relation_symbol)
+        res, rel_sym = _canonicalize_relation(residual, relation_symbol)
+        new(wrap(res), rel_sym)
     end
 end
 
@@ -41,7 +41,7 @@ const _restriction_relations = (Symbol("!="), :>, Symbol(">="), :<, Symbol("<=")
 struct SymEquation
     id::EqId
     residual::Symbolics.Num
-    function SymEquation(residual::Symbolics.Num, id::EqId=UNASSIGNED_ID)
+    function SymEquation(residual::Symbolics.Num, id::EqId=fresh_id())
         new(id, residual)
     end
 end
@@ -61,10 +61,13 @@ struct DomConstraint
     relation::SymRelation
 end
 
+DomConstraint(relation::SymRelation) = DomConstraint(fresh_id(), relation)
+DomConstraint(expr::Symbolics.Num) = DomConstraint(fresh_id(), SymRelation(expr))
+
 constraint_variables(c::DomConstraint) =
     Symbolics.get_variables(Symbolics.unwrap(c.relation.residual))
 
-# Canonical order inside a factor: by content, never by Id, so a domain does
+# Canonical order inside a block: by content, never by Id, so a domain does
 # not depend on the order its constraints were supplied in. The Id is only a
 # final tie-break between constraints with identical content.
 _content_key(c::DomConstraint) = (string(c.relation.residual), String(c.relation.relation))
@@ -85,7 +88,7 @@ end
 """
     Paving(interior, boundary, roi, tolerance)
 
-Branch-and-prune result for one domain factor: boxes certainly inside, and
+Branch-and-prune result for one domain block: boxes certainly inside, and
 boxes too small to classify (the boundary). `roi` and `tolerance` record the
 global settings it was computed with, so a paving made under other settings is
 recomputed rather than reused. Deliberately not parametrized: an empty paving
@@ -97,22 +100,22 @@ struct Paving
     roi::Float64
     tolerance::Float64
 end
-
 """
-    DomBlock(variables, constraint_ids)
+    DomBlock(variables, constraint_ids, [paving])
 
-One factor (i.e. 'Block') of a domain: a set of variables together with the
+One block of a domain: a set of variables together with the
 constraints that couple them. The domain is the Cartesian product of its factors.
 A factor stores only the *Ids* of its constraints; the constraint data lives once,
 in `SymDomain.constraints`.
 """
 mutable struct DomBlock
-    const variables::Tuple{Vararg{Symbolics.Num}}      # canonical order (by string)
-    const constraint_ids::Tuple{Vararg{ConstraintId}}  # canonical order (by content)
+    variables::Vector{Symbolics.Num}      # canonical order (by string)
+    constraint_ids::Vector{ConstraintId}  # canonical order (by content)
     paving::Union{Nothing,Paving}
 end
 
-DomBlock(variables, constraint_ids) = DomBlock(variables, constraint_ids, nothing)
+DomBlock(variables::Vector{Symbolics.Num}, constraint_ids::Vector{ConstraintId}) =
+    DomBlock(variables, constraint_ids, nothing)
 
 """
     SymDomain
@@ -120,71 +123,34 @@ DomBlock(variables, constraint_ids) = DomBlock(variables, constraint_ids, nothin
 A domain is a Cartesian product of `DomBlock`s, each a connected group of
 variables and the constraints coupling them.
 `constraints` is the single source of truth: every constraint appears exactly once,
-sorted by Id (so lookup by Id is a binary search). `factors` partition those
+sorted by Id (so lookup by Id is a binary search). `blocks` partition those
 constraints by Id.
 
-TODO: rename factors to blocks comprehensively in all DomBlock related semantics
+Use `_unchecked_domain(constraints, factors, variables)` for internal fast-path
+construction when invariants are already guaranteed, or `SymDomain(...)` in
+`domain_algebra.jl` for validated and canonicalized construction.
 """
 struct SymDomain
-    constraints::Tuple{Vararg{DomConstraint}}
-    factors::Tuple{Vararg{DomBlock}}
-    variables::Tuple{Vararg{Symbolics.Num}}
+    constraints::Vector{DomConstraint}
+    blocks::Vector{DomBlock}
+    variables::Vector{Symbolics.Num}
 
-    function SymDomain(constraints::AbstractVector{DomConstraint}, factors::AbstractVector{DomBlock})
-        sorted = sort(collect(DomConstraint, constraints), by=c -> c.id)
-        for i in eachindex(sorted)
-            sorted[i].id == UNASSIGNED_ID &&
-                throw(ArgumentError("constraints must have an Id (or a provisional one) before they enter a SymDomain"))
-            i > 1 && sorted[i].id == sorted[i-1].id &&
-                throw(ArgumentError("duplicate domain constraint id $(sorted[i].id)"))
-        end
+    global _unchecked_domain(
+        constraints::Vector{DomConstraint},
+        blocks::Vector{DomBlock},
+        variables::Vector{Symbolics.Num},
+    ) = new(constraints, blocks, variables)
+end
 
-        claimed = falses(length(sorted))
-        seen_variables = Symbolics.Num[]
-        canonical = DomBlock[]
+function _unchecked_domain(constraints::Vector{DomConstraint}, blocks::Vector{DomBlock})
+    variables = Symbolics.Num[v for b in blocks for v in b.variables]
+    return _unchecked_domain(constraints, blocks, variables)
+end
 
-        for factor in factors
-            variables = Symbolics.Num[]
-            for v in factor.variables
-                any(isequal(v), variables) || push!(variables, v)
-            end
-            isempty(variables) && throw(ArgumentError("domain factors cannot be empty"))
-            for v in variables
-                any(isequal(v), seen_variables) &&
-                    throw(ArgumentError("variable $v appears in more than one domain factor"))
-                push!(seen_variables, v)
-            end
-            sort!(variables, by=string)
-
-            for id in factor.constraint_ids
-                i = _constraint_index(sorted, id)
-                i == 0 && throw(ArgumentError("factor refers to unknown constraint id $id"))
-                claimed[i] && throw(ArgumentError("constraint $id belongs to more than one factor"))
-                claimed[i] = true
-                for v in constraint_variables(sorted[i])
-                    _contains_equal(variables, v) ||
-                        throw(ArgumentError("constraint $id references variable $v outside its factor"))
-                end
-            end
-
-            members = ConstraintId[id for id in factor.constraint_ids]
-            sort!(members, by=id -> _constraint_sort_key(sorted[_constraint_index(sorted, id)]))
-            variables_t, members_t = Tuple(variables), Tuple(members)
-
-            # An already-canonical factor is kept as is (object and paving). A
-            # re-ordered one gets a new object with no paving: the paving's box
-            # coordinates follow `variables`, so it would no longer line up.
-            is_canonical = length(factor.variables) == length(variables_t) &&
-                all(isequal(a, b) for (a, b) in zip(factor.variables, variables_t)) &&
-                factor.constraint_ids == members_t
-            push!(canonical, is_canonical ? factor : DomBlock(variables_t, members_t))
-        end
-
-        all(claimed) || throw(ArgumentError("every constraint must belong to a factor"))
-        sort!(canonical, by=f -> string(f.variables[begin]))
-        all_variables = Symbolics.Num[v for f in canonical for v in f.variables]
-        new(Tuple(sorted), Tuple(canonical), Tuple(all_variables))
-    end
+function _unchecked_domain(constraints::Vector{DomConstraint})
+    blocks = DomBlock[]
+    variables = Symbolics.Num[]
+    return _unchecked_domain(constraints, blocks, variables)
 end
 
 # ===========================================================================
@@ -422,7 +388,6 @@ mutable struct DETree
     active::Stack{NodeId}
     solved::Vector{NodeId}
     root::RootNode
-    id_counter::Int # one counter shared by every kind of Id (nodes, constraints, ...)
 end
 
 # ===========================================================================
@@ -448,12 +413,12 @@ end
     EvidenceDomain
 
 The part of a leaf's domain that bears on one expression: only the domain
-factors that share a variable with it. Every other factor is irrelevant to the
+blocks that share a variable with it. Every other block is irrelevant to the
 expression and is never looked at.
 """
 mutable struct EvidenceDomain
     source::SymDomain
-    factors::Vector{DomBlock}
+    blocks::Vector{DomBlock}
     key::Any
     sub::Union{Nothing,SymDomain}
 end

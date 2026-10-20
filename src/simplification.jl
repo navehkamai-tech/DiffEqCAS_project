@@ -439,7 +439,7 @@ function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
             target_term = p == 1 ? target : target^p
             coeff = simplify(Symbolics.coeff(remainder, target_term))
             if !isequal(coeff, 0)
-                grouped_expr += coeff * wrap(target)
+                grouped_expr += coeff * wrap(target_term)
                 remainder = simplify(remainder - coeff * target_term)
             end
         end

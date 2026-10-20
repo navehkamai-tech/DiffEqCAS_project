@@ -1,70 +1,80 @@
-const cache_size = Ref{Int64}(1024)
-global cache = LRU{Any,Any}(maxsize=cache_size[])
-
-# NOTE on names: a "factor" in this file is a multiplicative factor of an
-# equation. A `DomBlock` is a factor of the *domain*; the variables below
-# named `dfactor` / fields named `factors` of `EvidenceDomain` are those.
-
-function _evidence_domain(sys::DESys, expr)
-    expr_variables = Symbolics.get_variables(Symbolics.unwrap(expr))
-    domain = sys.domain
-    relevant = DomBlock[
-        f for f in domain.factors if any(v -> _contains_equal(f.variables, v), expr_variables)]
-    return EvidenceDomain(domain, relevant, factors_content_key(domain, relevant), nothing)
-end
-
-function _ctx_domain!(ctx::EvidenceDomain)
-    ctx.sub === nothing && (ctx.sub = subdomain(ctx.source, ctx.factors))
-    return ctx.sub
-end
-
 function factor_evidence(factor, sys::DESys)
-    ctx = _evidence_domain(sys, factor)
-    key = (:constraint_evidence, Symbolics.unwrap(factor), ctx.key)
-    haskey(cache, key) && return cache[key]
-    result = _factor_evidence_uncached(factor, sys, ctx)
-    cache[key] = result
-    return result
+    if _contains_equal(sys.ps, factor) && isempty(_evidence_domain(sys.domain, factor).blocks)
+        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, undetermined)
+    end
+    return domain_evidence(factor, sys.domain)
 end
 
 factor_sign(factor, sys::DESys) = factor_evidence(factor, sys).sign
 factor_sign(factor, sys::DETree) =
     length(sys.active) == 1 ?
-    factor_sign(factor, sys.nodes[ first(sys.active) ].system) :
+    factor_sign(factor, sys.nodes[first(sys.active)].system) :
     throw(ArgumentError("factor sign requires one selected branch"))
 
 factor_divisibility(factor, sys::DESys) = factor_evidence(factor, sys).divisibility
 factor_divisibility(factor, sys::DETree) =
     length(sys.active) == 1 ?
-    factor_divisibility(factor, sys.nodes[ first(sys.active) ].system) :
+    factor_divisibility(factor, sys.nodes[first(sys.active)].system) :
     throw(ArgumentError("factor divisibility requires one selected branch"))
 
-function _factor_evidence_uncached(factor, sys::DESys, ctx::EvidenceDomain)
-    if _contains_equal(sys.ps, factor)
-        return ConstraintEvidence(IntervalArithmetic.Interval(-Inf, Inf), divisible, undetermined)
-    end
-    # Stage 1: Prime the global cache with exact bounds for independent variables
+# ===========================================================================
+# 1. Domain-Level Evidence & Feasibility Engine (Pure SymDomain, no DESys)
+# ===========================================================================
+
+const cache_size = Ref{Int64}(1024)
+global cache = LRU{Any,Any}(maxsize=cache_size[])
+
+function _evidence_domain(domain::SymDomain, expr)
+    expr_variables = Symbolics.get_variables(Symbolics.unwrap(expr))
+    relevant = DomBlock[
+        b for b in domain.blocks if any(v -> _contains_equal(b.variables, v), expr_variables)]
+    return EvidenceDomain(domain, relevant, blocks_content_key(domain, relevant), nothing)
+end
+
+function _ctx_domain!(ctx::EvidenceDomain)
+    ctx.sub === nothing && (ctx.sub = subdomain(ctx.source, ctx.blocks))
+    return ctx.sub
+end
+
+"""
+    domain_evidence(expr, domain::SymDomain) -> ConstraintEvidence
+
+Staged sign, bound, and zero-set inference for `expr` over `domain`.
+Runs cheap algebraic/interval stages first (`_prime_domain_bounds!`, `_infer_tree`,
+`_affine_factor_evidence`) before falling back to branch-and-prune paving.
+"""
+function domain_evidence(expr, domain::SymDomain)
+    ctx = _evidence_domain(domain, expr)
+    key = (:constraint_evidence, Symbolics.unwrap(expr), ctx.key)
+    haskey(cache, key) && return cache[key]
+    result = _domain_evidence_uncached(expr, ctx)
+    cache[key] = result
+    return result
+end
+
+function _domain_evidence_uncached(expr, ctx::EvidenceDomain)
+    # Stage 1: Prime the global cache with exact 1D affine bounds from domain blocks
     _prime_domain_bounds!(ctx)
 
-    # Stage 2: Fast structural and interval arithmetic
-    best_evidence = _infer_tree(factor, ctx)
-
-    if best_evidence.divisibility !== undetermined || isempty(ctx.factors)
+    # Stage 2: Fast structural and interval arithmetic tree walk
+    best_evidence = _infer_tree(expr, ctx)
+    if best_evidence.divisibility !== undetermined || isempty(ctx.blocks)
         return best_evidence
     end
 
+    # Stage 3+: Progressive refinement (Affine -> Centered -> Sturm -> Paved)
     for stage in (
         _affine_factor_evidence,
         _centered_factor_evidence,
         _sturm_factor_evidence,
         _paved_factor_evidence,
     )
-        result = stage(factor, ctx, sys)
+        result = stage(expr, ctx)
         if result !== nothing
             new_bound = intersect_interval(best_evidence.bound, result.bound)
             new_sign = result.sign !== undetermined ? result.sign : best_evidence.sign
             new_divis = result.divisibility !== undetermined ? result.divisibility : best_evidence.divisibility
-            if new_divis === undetermined && (new_sign in (positive, negative) || !(0 ∈ new_bound))
+            if new_divis === undetermined && (new_sign in (positive, negative) || !(0 in new_bound))
                 new_divis = divisible
             end
             best_evidence = ConstraintEvidence(new_bound, new_divis, new_sign)
@@ -74,13 +84,88 @@ function _factor_evidence_uncached(factor, sys::DESys, ctx::EvidenceDomain)
     return best_evidence
 end
 
+"""
+    relation_status(rel::SymRelation, domain::SymDomain) -> Symbol
+
+Classify `rel` (`residual ⋈ 0`) over `domain` using the staged evidence pipeline:
+- `:redundant`  if `rel` holds everywhere on `domain`
+- `:infeasible` if `rel` holds nowhere on `domain`
+- `:active`     if both `rel` and its negation are satisfiable on `domain`
+"""
+function relation_status(rel::SymRelation, domain::SymDomain)::Symbol
+    ctx = _evidence_domain(domain, rel.residual)
+    isempty(ctx.blocks) && return :active
+
+    # Fast Path (Stages 1 & 2): Prime 1D affine bounds and run interval/sign tree inference!
+    # This resolves 1D intervals (e.g. x > 2 vs x > 0) and sign-definite expressions
+    # with ZERO paving overhead.
+    _prime_domain_bounds!(ctx) || return :infeasible
+    ev = _infer_tree(simplify(rel.residual), ctx)
+    lo, hi = inf(ev.bound), sup(ev.bound)
+    op = _get_relation(rel)
+
+    if op === (>)
+        (lo > 0.0 || ev.sign === positive) && return :redundant
+        (hi <= 0.0 || ev.sign in (negative, iszero)) && return :infeasible
+    elseif op === (>=)
+        (lo >= 0.0 || ev.sign in (positive, iszero)) && return :redundant
+        (hi < 0.0 || ev.sign === negative) && return :infeasible
+    elseif op === (<)
+        (hi < 0.0 || ev.sign === negative) && return :redundant
+        (lo >= 0.0 || ev.sign in (positive, iszero)) && return :infeasible
+    elseif op === (<=)
+        (hi <= 0.0 || ev.sign in (negative, iszero)) && return :redundant
+        (lo > 0.0 || ev.sign === positive) && return :infeasible
+    elseif op === (==)
+        (lo == 0.0 && hi == 0.0 || ev.sign === iszero) && return :redundant
+        (lo > 0.0 || hi < 0.0 || ev.divisibility === divisible) && return :infeasible
+    elseif op === (!=)
+        (lo > 0.0 || hi < 0.0 || ev.divisibility === divisible) && return :redundant
+        (lo == 0.0 && hi == 0.0 || ev.sign === iszero) && return :infeasible
+    end
+
+    expr_vars = Symbolics.get_variables(Symbolics.unwrap(rel.residual))
+    if length(expr_vars) == 1 && _affine_coefficients(Symbolics.unwrap(rel.residual), Symbolics.unwrap(only(expr_vars))) !== nothing
+        return :active
+    end
+
+    # Fallback (Stages 3 & 4): Future Sturm/Centered stages or HC4Revise Paving
+    sub_dom = _ctx_domain!(ctx)
+    # 1. Is `rel` itself satisfiable on `sub_dom`?
+    rel_sat = _raw_relation_satisfiable(rel, sub_dom, true)
+    rel_sat || return :infeasible
+
+    # 2. Is the negation of `rel` satisfiable on `sub_dom`?
+    # If the negation cannot be satisfied, `rel` is redundant!
+    neg_rel = _negate_relation(rel)
+    needs_boundary = (neg_rel.relation === Symbol("=="))
+    neg_sat = _raw_relation_satisfiable(neg_rel, sub_dom, needs_boundary)
+    return neg_sat ? :active : :redundant
+end
+
+# Direct paving check on a single relation without recursing into `add_constraints`
+function _raw_relation_satisfiable(rel::SymRelation, sub_dom::SymDomain, include_boundary::Bool)
+    all_vars = copy(sub_dom.variables)
+    for v in Symbolics.get_variables(Symbolics.unwrap(rel.residual))
+        _push_unique!(all_vars, (_as_num(v),))
+    end
+    sort!(all_vars, by=string)
+    c_new = DomConstraint(rel)
+    all_cs = vcat(sub_dom.constraints, [c_new])
+    block = DomBlock(all_vars, ConstraintId[c.id for c in all_cs])
+    temp_dom = SymDomain(all_cs, [block])
+    inner, boundary = _pave_block(temp_dom, temp_dom.blocks[1])
+    return include_boundary ? (!isempty(inner) || !isempty(boundary)) : !isempty(inner)
+end
+
 # beginning of the pipeline - always called first
 function _prime_domain_bounds!(ctx::EvidenceDomain)
-    for dfactor in ctx.factors
-        ivs = collect(dfactor.variables)
+    for block in ctx.blocks
+        ivs = block.variables
         bounds = Dict(iv => IntervalArithmetic.Interval(-Inf, Inf) for iv in ivs)
-
-        for constraint in constraints_of(ctx.source, dfactor)
+        strict_lo = Dict(iv => false for iv in ivs)
+        strict_hi = Dict(iv => false for iv in ivs)
+        for constraint in constraints_of(ctx.source, block)
             op = _get_relation(constraint.relation)
             op === (!=) && continue
             expr = Symbolics.unwrap(constraint.relation.residual)
@@ -88,26 +173,42 @@ function _prime_domain_bounds!(ctx::EvidenceDomain)
             constraint_ivs = [iv for iv in ivs if _contains_equal(expr_vars, iv)]
             length(constraint_ivs) == 1 || continue
             iv = only(constraint_ivs)
-            is_feasible = _update_affine_bound!(bounds, expr, iv, op)
-            is_feasible || throw(DomainError(iv, "Infeasible domain constraint detected."))
+            is_feasible = _update_affine_bound!(bounds, strict_lo, strict_hi, expr, iv, op)
+            is_feasible || return false
         end
-
         # Inject the bounds into the global cache to prime _infer_tree
         for (iv, bound) in bounds
-            cache_key = (:constraint_evidence, Symbolics.unwrap(iv), ctx.key)
-            sign_state = sup(bound) < 0 ? negative : (inf(bound) > 0 ? positive : (inf(bound) == 0 && sup(bound) == 0 ? iszero : undetermined))
-            divis_state = (sign_state in (positive, negative) || !(0 ∈ bound)) ? divisible : (sign_state === iszero ? haszero : undetermined)
+            cache_key = (:constraint_evidence, Symbolics.unwrap(iv), (block_content_key(ctx.source, block),))
+            lo, hi = inf(bound), sup(bound)
+            s_lo, s_hi = strict_lo[iv], strict_hi[iv]
+            sign_state = (hi < 0 || (hi == 0 && s_hi)) ? negative :
+                         (lo > 0 || (lo == 0 && s_lo)) ? positive :
+                         (lo == 0 && hi == 0) ? iszero : undetermined
+            divis_state = (sign_state in (positive, negative) || !(0 in bound)) ? divisible :
+                          (sign_state === iszero ? haszero : undetermined)
             cache[cache_key] = ConstraintEvidence(bound, divis_state, sign_state)
         end
     end
+    return true
 end
 
 function _infer_tree(expr, ctx::EvidenceDomain)
-    expr = simplify(expr)
     isequal(expr, 0) && return ConstraintEvidence(interval(0, 0), haszero, iszero)
+
     # 1. Check existing cache
-    key = (:constraint_evidence, Symbolics.unwrap(expr), ctx.key)
-    if haskey(cache, key) && cache[key].sign !== undetermined
+    local key
+    if !SU.iscall(expr)
+        var_block = block_of(ctx.source, expr)
+        if var_block !== nothing
+            key = (:constraint_evidence, Symbolics.unwrap(expr), (block_content_key(ctx.source, var_block),))
+        else
+            key = (:constraint_evidence, Symbolics.unwrap(expr), ctx.key)
+        end
+    else
+        key = (:constraint_evidence, Symbolics.unwrap(expr), ctx.key)
+    end
+
+    if haskey(cache, key)
         return cache[key]
     end
 
@@ -157,63 +258,67 @@ function _combine_child_evidence(op, children)
 end
 
 # affine checks
-function _update_affine_bound!(bounds, expr, iv, op)
+function _update_affine_bound!(bounds, strict_lo, strict_hi, expr, iv, op)
     affine = _affine_coefficients(expr, Symbolics.unwrap(iv))
-    affine === nothing && return true # true indicates the domain remains feasible
+    affine === nothing && return true
     coeff = SU.unwrap_const(affine[1])
     intercept = SU.unwrap_const(affine[2])
     (coeff isa Real && intercept isa Real) || return true
-    val = -intercept / coeff
+    val = Float64(-intercept / coeff)
     effective_op = coeff > 0 ? op : _reverse_relation(op)
-
-    new_bound = if effective_op in ((<), (<=))
-        Interval(-Inf, val)
+    old_lo, old_hi = inf(bounds[iv]), sup(bounds[iv])
+    if effective_op in ((<), (<=))
+        is_strict = effective_op === (<)
+        if val < old_hi || (val == old_hi && is_strict)
+            strict_hi[iv] = is_strict
+        end
+        bounds[iv] = intersect_interval(bounds[iv], Interval(-Inf, val))
     elseif effective_op in ((>), (>=))
-        Interval(val, Inf)
-    else
-        Interval(val, val) # effective_op === (==)
+        is_strict = effective_op === (>)
+        if val > old_lo || (val == old_lo && is_strict)
+            strict_lo[iv] = is_strict
+        end
+        bounds[iv] = intersect_interval(bounds[iv], Interval(val, Inf))
+    else # effective_op === (==)
+        bounds[iv] = intersect_interval(bounds[iv], Interval(val, val))
     end
-
-    bounds[iv] = intersect_interval(bounds[iv], new_bound)
-    # Return false if the updated interval is empty, signaling an infeasible domain
-    return !isempty(bounds[iv])
+    isempty(bounds[iv]) && return false
+    lo, hi = inf(bounds[iv]), sup(bounds[iv])
+    (lo == hi && (strict_lo[iv] || strict_hi[iv])) && return false
+    return true
 end
 
 function _affine_coefficients(expr, iv)
-    isequal(expr, iv) && return (one(expr), zero(expr))
-    _contains_equal(Symbolics.get_variables(expr), iv) || return (zero(expr), expr)
+    res = _affine_walk(Symbolics.unwrap(expr), Symbolics.unwrap(iv))
+    (res === nothing || isequal(res[1], 0)) && return nothing
+    return res
+end
+
+function _affine_walk(expr, iv)
+    isequal(expr, iv) && return (1, 0)
+    _contains_equal(Symbolics.get_variables(expr), iv) || return (0, expr)
     SU.iscall(expr) || return nothing
 
     op = SU.operation(expr)
     args = SU.arguments(expr)
+
     if op === (+)
-        parts = [_affine_coefficients(arg, iv) for arg in args]
+        parts = [_affine_walk(arg, iv) for arg in args]
         any(isnothing, parts) && return nothing
-        return (sum(part[1] for part in parts), sum(part[2] for part in parts))
-    elseif op === (-)
-        if length(args) == 1
-            part = _affine_coefficients(args[1], iv)
-            isnothing(part) && return nothing
-            return (-part[1], -part[2])
-        end
-        length(args) == 2 || return nothing
-        lhs, rhs = _affine_coefficients.(args, Ref(iv))
-        (isnothing(lhs) || isnothing(rhs)) && return nothing
-        return (lhs[1] - rhs[1], lhs[2] - rhs[2])
+        return (sum(p[1] for p in parts), sum(p[2] for p in parts))
     elseif op === (*)
-        parts = [_affine_coefficients(arg, iv) for arg in args]
+        parts = [_affine_walk(arg, iv) for arg in args]
         any(isnothing, parts) && return nothing
-        variable_parts = filter(part -> !isequal(part[1], 0), parts)
-        length(variable_parts) > 1 && return nothing
-        constant = prod(part[2] for part in parts if isequal(part[1], 0))
-        isempty(variable_parts) && return (zero(expr), constant)
-        variable = only(variable_parts)
-        return (variable[1] * constant, variable[2] * constant)
-    elseif op === (/)
-        length(args) == 2 || return nothing
-        lhs, rhs = _affine_coefficients.(args, Ref(iv))
-        (isnothing(lhs) || isnothing(rhs)) && return nothing
-        rhs[1] == 0 && return (lhs[1] / rhs[2], lhs[2] / rhs[2])
+        var_parts = filter(p -> !isequal(p[1], 0), parts)
+        length(var_parts) > 1 && return nothing
+        c = prod(p[2] for p in parts if isequal(p[1], 0); init=1)
+        isempty(var_parts) && return (0, c)
+        vp = only(var_parts)
+        return (vp[1] * c, vp[2] * c)
+    elseif op === (/) && length(args) == 2
+        lhs, rhs = _affine_walk(args[1], iv), _affine_walk(args[2], iv)
+        (lhs === nothing || rhs === nothing) && return nothing
+        isequal(rhs[1], 0) && !isequal(rhs[2], 0) && return (lhs[1] / rhs[2], lhs[2] / rhs[2])
     end
     return nothing
 end
@@ -247,31 +352,32 @@ end
 
 Classify a factor that is affine in one independent variable.
 """
-function _affine_factor_evidence(factor, ctx::EvidenceDomain, sys::DESys)
+function _affine_factor_evidence(factor, ctx::EvidenceDomain)
     factor_variables = Symbolics.get_variables(Symbolics.unwrap(factor))
-    independent_variables = [iv for iv in sys.ivs if _contains_equal(factor_variables, iv)]
-    length(independent_variables) == 1 || return nothing
+    domain_vars = [iv for iv in ctx.source.variables if _contains_equal(factor_variables, iv)]
+    length(domain_vars) == 1 || return nothing
+    iv = only(domain_vars)
 
-    iv = only(independent_variables)
     coefficients = _affine_coefficients(Symbolics.unwrap(factor), Symbolics.unwrap(iv))
     coefficients === nothing && return nothing
+
     coeff_evidence = _infer_tree(coefficients[1], ctx)
     coeff_evidence.sign in (positive, negative) || return nothing
 
-    dfactor = factor_of(ctx.source, iv)
-    dfactor === nothing && return nothing
-    return _probe_evidence(factor, subdomain(ctx.source, [dfactor]))
+    block = block_of(ctx.source, iv)
+    block === nothing && return nothing
+    return _probe_evidence(factor, subdomain(ctx.source, [block]))
 end
 
-function _centered_factor_evidence(factor, ctx::EvidenceDomain, sys::DESys)
+function _centered_factor_evidence(factor, ctx::EvidenceDomain)
     return nothing # PSEUDOCODE: replace with centered/mean-value forms.
 end
 
-function _sturm_factor_evidence(factor, ctx::EvidenceDomain, sys::DESys)
+function _sturm_factor_evidence(factor, ctx::EvidenceDomain)
     return nothing # PSEUDOCODE: replace with certified Sturm isolation.
 end
 
-function _paved_factor_evidence(factor, ctx::EvidenceDomain, sys::DESys)
+function _paved_factor_evidence(factor, ctx::EvidenceDomain)
     return _probe_evidence(factor, _ctx_domain!(ctx))
 end
 
@@ -293,7 +399,7 @@ function _structural_sign(op, children)
         all(c -> c.sign === iszero, children) && return iszero
     elseif op === (-) && length(children) == 1
         c = children[1]
-        return c.sign === positive ? negative : c.sign === negative ? positive : undetermined
+        return c.sign === positive ? negative : c.sign === negative ? positive : c.sign === iszero ? iszero : undetermined
     elseif op === (*)
         any(c -> c.sign === iszero, children) && return iszero
         if all(c -> c.sign in (positive, negative), children)
@@ -336,14 +442,6 @@ function _reverse_relation(op)
     op === (>) && return (<)
     op === (>=) && return (<=)
 end
-
-function _combined_constraint_sign(found_positive, found_negative)
-    found_positive == found_negative && return either
-    return found_positive ? positive : negative
-end
-
-_divisibility_cache_key(factor, ctx::EvidenceDomain) =
-    (:divisibility, Symbolics.unwrap(factor), ctx.key)
 
 function _has_depvar_or_diff(expr, sys::DESys)
     any(variable -> _contains_equal(sys.dvs, variable),

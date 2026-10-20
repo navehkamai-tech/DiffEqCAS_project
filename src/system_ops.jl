@@ -1,10 +1,10 @@
 # ===========================================================================
 # Equations & Boundary Conditions Operations
 # ===========================================================================
-SymEquation(eq::Symbolics.Equation, id::EqId=UNASSIGNED_ID) = SymEquation(eq.lhs - eq.rhs, id)
-SymEquation(expr::Expr, id::EqId=UNASSIGNED_ID) = SymEquation(wrap(expr), id)
+SymEquation(eq::Symbolics.Equation, id::EqId=fresh_id()) = SymEquation(eq.lhs - eq.rhs, id)
+SymEquation(expr::Expr, id::EqId=fresh_id()) = SymEquation(wrap(expr), id)
 
-Symbolics.simplify(eq::SymEquation) = SymEquation( simplify(eq.residual), eq.id)
+Symbolics.simplify(eq::SymEquation) = SymEquation(simplify(eq.residual), eq.id)
 Symbolics.expand(eq::SymEquation) = SymEquation(expand(eq.residual), eq.id)
 
 function boundary_domain(bc::BoundaryCondition, domain::SymDomain)
@@ -82,6 +82,7 @@ end
 # Replace a branch's state without replacing the branch object stored by its
 # parent system. This also preserves branch-local metadata not involved in
 # the transformation.
+# needs to be updated to handle the history of transformations, so should probably take in an ActiveNode and return an ActiveNode with the updated history
 function _replace_branch!(
     branch::DESys;
     eqs=branch.eqs, ivs=branch.ivs, dvs=branch.dvs, ps=branch.ps, bcs=branch.bcs,
