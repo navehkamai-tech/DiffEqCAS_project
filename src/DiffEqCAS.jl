@@ -10,7 +10,7 @@ using Symbolics
 using LinearAlgebra
 using DomainSets
 using ModelingToolkit
-using Unitful
+using DynamicQuantities
 using IntervalArithmetic
 using IntervalBoxes
 using LRUCache
@@ -24,13 +24,14 @@ import Symbolics: unwrap, wrap, jacobian, simplify, substitute, get_variables
 import SymbolicUtils as SU
 import SymbolicUtils: maketerm, @rule, @acrule
 import Base.MathConstants as MC
+import ModelingToolkit: VariableUnit
 
 # ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
 # Core Types & IDs
 export NodeId, ConstraintId, EqId
-export SymRelation, DomConstraint, Paving, DomBlock, SymDomain
+export SymRelation, Constraint, Paving, DomBlock, SymDomain
 export SymEquation, SeriesTerm, SeriesSum
 export Locus, Face, Explicit, Interior, Limit, ExhaustiveLimit, BoundaryCondition
 export Transform, XStep, XChain, IvTransform, PsTransform, DvTransform
@@ -68,28 +69,26 @@ export custom_rewrite, get_base_op, group_coefficients, nondimensionalize_pde
 include("constants.jl")
 using .Constants
 
-include("utils.jl")
 include("types.jl")
+include("utils.jl")
 
 # ---------------------------------------------------------------------------
-# Layer 2: Relations, Domain & Feasibility (Symbolic Topology & Paving Engine)
+# Layer 2: Domain & satisfiability (Symbolic Topology & Paving Engine)
 # ---------------------------------------------------------------------------
-include("relations.jl")
-include("domain_algebra.jl")
-include("domain_paving.jl")
-include("feasibility.jl")
-include("system_ops.jl")
+include("paving.jl")
+include("satisfiability.jl")
+include("domains.jl")
 
 # ---------------------------------------------------------------------------
 # Layer 3: Independent modules (currently only dependent on types.jl)
 # ---------------------------------------------------------------------------
-include("units.jl")
+include("system_ops.jl")
 include("display.jl")
 
 # ---------------------------------------------------------------------------
 # Layer 4: Domain-Aware Inference & Symbolic Rules
 # ---------------------------------------------------------------------------
-include("symbolic_rules.jl")
+include("symbolic_rules.jl") # as per the plan the rules will each go where they belong, there won't be a unified rules file
 
 # ---------------------------------------------------------------------------
 # Layer 5: Simplification, Transformations

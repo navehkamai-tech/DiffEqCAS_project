@@ -2,15 +2,6 @@
 # Flat Tape-Compiled HC4Revise Engine
 # ===========================================================================
 
-const _BI = BareInterval{Float64}
-
-@inline _bi(a::Real, b::Real) = bareinterval(Float64(a), Float64(b))
-@inline _bi(a::Real) = bareinterval(Float64(a))
-@inline _bi(x::_BI) = x
-@inline _bi(x::Interval) = bareinterval(x)
-@inline _empty_bi() = emptyinterval(_BI)
-@inline _entire_bi() = entireinterval(_BI)
-
 @enum _OpCode::UInt8 begin
     OP_ADD
     OP_SUB
@@ -68,13 +59,13 @@ struct CompiledHC4
 end
 
 function _give_confine(rel)
-    if rel === (<) || rel === (<=)
+    if rel === _LT || rel === _LE
         return _bi(-Inf, 0.0)
-    elseif rel === (>) || rel === (>=)
+    elseif rel === _GT || rel === _GE
         return _bi(0.0, Inf)
-    elseif rel === (==)
+    elseif rel === _EQ
         return _bi(0.0, 0.0)
-    elseif rel === (!=)
+    elseif rel === _NE
         return _entire_bi()
     end
     throw(ArgumentError("Argument must be a supported relation, got $rel"))
@@ -195,13 +186,28 @@ function compile_hc4(relation::SymRelation, variables)
     end
 
     root_idx = node_to_idx[root_expr]
-    rel_op = _get_relation(relation)
-    confine = _give_confine(rel_op)
+    confine = _give_confine(relation.relation)
     tape_len = num_vars + num_consts + length(call_nodes)
 
     return CompiledHC4(num_vars, constants, instructions, nary_args, root_idx, confine, rel_op, tape_len)
 end
 
+# `compile_hc4` rejects operations the tape does not know; such constraints are
+# dropped. Dropping is sound for contraction and for `No`, never for `Yes`.
+function _compilable(rel::SymRelation)::Bool
+    key = (:compilable, Symbolics.unwrap(rel.residual), rel.relation)
+    hit = get(cache, key, nothing)
+    hit === nothing || return hit
+    ok = true
+    try
+        compile_hc4(rel, _vars_of(rel.residual))
+    catch e
+        e isa ArgumentError || rethrow()
+        ok = false
+    end
+    cache[key] = ok
+    return ok
+end
 # ---------------------------------------------------------------------------
 # Elemental Reverse Contractors & Helpers
 # ---------------------------------------------------------------------------
@@ -633,16 +639,8 @@ function HC4Revise(box::IntervalBox, variables::Union{AbstractVector,Tuple}, rel
     return contracted
 end
 
-const ROI = Ref{Float64}(10000.0)
-const tolerance = Ref{Float64}(0.01)
-
-#=
-this is how to Change the global bound for this session
-DiffEqCAS.ROI[] = 50000.0
-=#
-
 # helper for constraints_to_domain
-function shrink_bounds!(bounds, constraint::DomConstraint)
+function shrink_bounds!(bounds, constraint::Constraint)
     vars = constraint_variables(constraint)
     if !(length(vars) == 1)
         return bounds
@@ -725,51 +723,6 @@ function _pave_constraints(box::IntervalBox{N,T}, constraints, variables, epsilo
     return inner, boundary
 end
 
-# Pave one block: the box search only ever sees that block's variables, so
-# the cost is exponential in the block's dimension, not the domain's.
-function _pave_block(domain::SymDomain, block::DomBlock)
-    variables = block.variables
-    bounds = Dict{Any,Vector{Float64}}(v => [-ROI[], ROI[]] for v in variables)
-    collected_constraints = DomConstraint[]
-    for c in constraints_of(domain, block)
-        push!(collected_constraints, c)
-        shrink_bounds!(bounds, c)
-    end
-    any(bounds[v][1] > bounds[v][2] for v in variables) &&
-        return (IntervalBox[], IntervalBox[])
-    intervals = [bareinterval(bounds[v][1], bounds[v][2]) for v in variables]
-    box = IntervalBox(intervals...)
-    return _pave_constraints(box, collected_constraints, variables, tolerance[])
-end
-
-"""
-    block_paving!(domain, block)
-
-The block's paving, computed on first use and stored on the block. `block`
-must belong to `domain`. A stored paving made under different `ROI`/`tolerance`
-settings is recomputed.
-"""
-function block_paving!(domain::SymDomain, block::DomBlock)
-    paving = block.paving
-    if paving === nothing || paving.roi < ROI[] || paving.tolerance > tolerance[]
-        inner, boundary = _pave_block(domain, block)
-        paving = Paving(inner, boundary, ROI[], tolerance[])
-        block.paving = paving
-    end
-    return paving
-end
-
-"""
-    domain_pavings(domain)
-
-One `Paving` per block, in block order, computed lazily and cached on the
-blocks. The domain is the product of these, which is never expanded:
-membership and feasibility are answered block by block.
-"""
-domain_pavings(domain::SymDomain) = Paving[block_paving!(domain, b) for b in domain.blocks]
-
-constraints_to_domain(domain::SymDomain) = isempty(domain) ? nothing : domain_pavings(domain)
-
 # `coord` is ordered like `domain.variables`; each block sees only its slice.
 function _in_pavings(coord, domain::SymDomain, pavings, include_boundary::Bool)
     length(coord) == length(domain.variables) ||
@@ -786,41 +739,181 @@ function _in_pavings(coord, domain::SymDomain, pavings, include_boundary::Bool)
     return true
 end
 
-function is_in_domain(coord::StaticArrays.SVector, domain::SymDomain; include_boundary::Bool=true)
-    isempty(domain) && return false
-    return _in_pavings(coord, domain, domain_pavings(domain), include_boundary)
+#------------------------------------------------------------------------------
+# Paving API for satisfiability
+#------------------------------------------------------------------------------
+
+"Run HC4Revise over all constraints to a fixed point. -> (feasible, intervals)"
+function _contract(cons, vars, bounds::Vector{_BI}; maxpass::Int=6)
+    usable = [c for c in cons if _compilable(c.relation)]
+    isempty(usable) && return true, bounds
+    tapes = CompiledHC4[compile_hc4(c.relation, vars) for c in usable]
+    ws = Vector{_BI}(undef, maximum(t.tape_len for t in tapes))
+    n = length(vars)
+    cur = copy(bounds)
+    for _ in 1:maxpass
+        changed = false
+        for tape in tapes
+            status, nb = HC4Revise(IntervalBox(Tuple(cur)), tape, ws)
+            status === :outside && return false, cur
+            for i in 1:n
+                new = _bi(nb[i])
+                if !isequal(new, cur[i])
+                    changed = true
+                    cur[i] = new
+                end
+            end
+        end
+        changed || break
+    end
+    return true, cur
 end
 
-# raw `key => constraints` pairs
-is_in_domain(coord::StaticArrays.SVector, domain_constraints::AbstractVector; include_boundary::Bool=true) =
-    is_in_domain(coord, _as_domain(domain_constraints), include_boundary)
+# Keep paving boxes finite: unbounded sides get a window of size ROI.
+function _window(iv::_BI)::_BI
+    isempty(iv) && return iv
+    lo, hi = inf(iv), sup(iv)
+    r = ROI[]
+    lo2 = isfinite(lo) ? lo : min(-r, isfinite(hi) ? hi - r : -r)
+    hi2 = isfinite(hi) ? hi : max(r, isfinite(lo) ? lo + r : r)
+    return _bi(lo2, hi2)
+end
+
+# The one place that paves. -> (feasible, inner, boundary, dropped)
+# `feasible=false` is a proof that nothing satisfies `cons` in the box (sound even
+# when constraints were dropped); `dropped` forbids certifying anything.
+function _pave_boxes(cons, vars, ivs::Vector{_BI})
+    any(isempty, ivs) && return false, Any[], Any[], false
+    usable = DomConstraint[c for c in cons if _compilable(c.relation)]
+    dropped = length(usable) < length(cons)
+    ok, ivs = _contract(usable, vars, ivs)
+    ok || return false, Any[], Any[], dropped
+    inner, boundary = _pave_constraints(IntervalBox(Tuple(ivs)), usable, vars, tolerance[])
+    return !(isempty(inner) && isempty(boundary)), inner, boundary, dropped
+end
 
 """
-    constraints_satisfiable(constraints, domain, include_boundary=true)
-
-Check whether `constraints` can be added to `domain` without emptying it. Only
-the blocks the new constraints touch are re-paved; untouched blocks are
-unchanged by definition.
+Is there a point satisfying `cons` inside the box `ivs`?
+Yes = an inner box exists; No = nothing survives; Unknown = only boundary boxes.
 """
-function constraints_satisfiable(
-    constraints,
-    domain,
-    include_boundary::Bool=true,
-)
-    new_constraints = constraints isa AbstractVector || constraints isa Tuple ?
-                      constraints : (constraints,)
-    combined = add_constraints(domain, new_constraints; throw_on_infeasible=false)
-    combined === nothing && return false
-    if !include_boundary
-        touched = Any[]
-        for raw in new_constraints
-            append!(touched, constraint_variables(_as_constraint(raw)))
+function _pave_answer(cons, vars, ivs::Vector{_BI})::Answer
+    feasible, inner, boundary, dropped = _pave_boxes(cons, vars, ivs)
+    feasible || return No
+    isempty(inner) || return dropped ? Unknown : Yes
+    return isempty(boundary) ? No : Unknown
+end
+
+function _sample_points(ivs::Vector{_BI})
+    n = length(ivs)
+    lo = [inf(i) for i in ivs]
+    hi = [sup(i) for i in ivs]
+    pts = Vector{Vector{Float64}}([(lo .+ hi) ./ 2])
+    if n <= 6
+        for m in 0:(2^n-1)
+            push!(pts, [((m >> (i - 1)) & 1) == 1 ? hi[i] : lo[i] for i in 1:n])
         end
-        for block in combined.blocks
-            any(v -> _contains_equal(block.variables, v), touched) || continue
-            inner, _ = _pave_block(combined, block)
-            isempty(inner) && return false
-        end
+    else
+        push!(pts, lo)
+        push!(pts, hi)
     end
-    return true
+    return pts
+end
+
+const _NO_WITNESS = (neg=false, zero=false, pos=false)
+
+# Existence certificates. Points of an inner box of the context satisfy every
+# constraint; evaluating `u` there with interval arithmetic gives a rigorous sign.
+# Zero is certified by the intermediate value theorem when both signs occur in
+# one box on which `u` stays bounded (no pole).
+function _find_witnesses(u, cons, vars, ivs::Vector{_BI})
+    feasible, inner, _, dropped = _pave_boxes(cons, vars, ivs)
+    feasible || return _NO_WITNESS
+    f = SymRelation(Symbolics.wrap(u), _EQ)
+    (dropped || isempty(inner) || !_compilable(f)) && return _NO_WITNESS
+    tape = compile_hc4(f, vars)
+    ws = Vector{_BI}(undef, tape.tape_len)
+    n = length(vars)
+    boxes = length(inner) > 64 ? partialsort(inner, 1:64; by=b -> -diam(b)) : inner
+    neg = pos = zer = false
+    for B in boxes
+        bi = _BI[_bi(B[i]) for i in 1:n]
+        for i in 1:n
+            ws[i] = bi[i]
+        end
+        range = _execute_forward!(tape, ws)
+        bounded = !isempty(range) && isfinite(inf(range)) && isfinite(sup(range))
+        bn = bp = false
+        for p in _sample_points(bi)
+            for i in 1:n
+                ws[i] = _bi(p[i])
+            end
+            r = _execute_forward!(tape, ws)
+            isempty(r) && continue
+            sup(r) < 0 && (bn = true)
+            inf(r) > 0 && (bp = true)
+            inf(r) == 0 && sup(r) == 0 && (zer = true)
+        end
+        neg |= bn
+        pos |= bp
+        bounded && bn && bp && (zer = true)
+        neg && pos && zer && break
+    end
+    return (neg=neg, zero=zer, pos=pos)
+end
+
+# Variables of the paving problem and their (windowed) starting intervals.
+function _probe_space(u, ctx::Ctx)
+    vars = Symbolics.Num[]
+    seen = Set{Symbolics.Num}()
+    for comp in ctx.comps, v in comp.variables
+        v in seen || (push!(seen, v); push!(vars, v))
+    end
+    for v in _vars_of(u)
+        v in seen || (push!(seen, v); push!(vars, v))
+    end
+    ivs = _BI[_window(_var_outer(v, ctx)) for v in vars]
+    return vars, ivs
+end
+
+function _var_outer(v::Symbolics.Num, ctx::Ctx)::_BI
+    for comp in ctx.comps
+        v in comp.variables && return _leaf_evidence(v, comp).outer
+    end
+    return _entire_bi()
+end
+
+const _PROBE_REL = (neg=_LT, zero=_EQ, pos=_GT)
+
+# Is `expr ⋈ 0` (⋈ chosen by `w`) satisfiable together with the context?
+function _probe(u, ctx::Ctx, cons, vars, ivs, w::Symbol)::Answer
+    key = (:probe, u, ctx.key, w, _env())
+    hit = get(cache, key, nothing)
+    hit === nothing || return hit
+    extra = DomConstraint(0, SymRelation(Symbolics.wrap(u), _PROBE_REL[w]))
+    ans = _pave_answer(vcat(cons, [extra]), vars, ivs)
+    cache[key] = ans
+    return ans
+end
+
+# Stage 7. Witnesses first (they can settle several answers with one paving of
+# the context), then one probe paving per answer still open.
+function _stage_paving(u, ctx::Ctx, evidence::Evidence, want)::Evidence
+    pending = [w for w in want if _answer(evidence, w) === Unknown]
+    isempty(pending) && return evidence
+    cons = _ctx_constraints(ctx)
+    vars, ivs = _probe_space(u, ctx)
+    wkey = (:wit, u, ctx.key, _env())
+    wit = get(cache, wkey, nothing)
+    if wit === nothing
+        wit = _find_witnesses(u, cons, vars, ivs)
+        cache[wkey] = wit
+    end
+    for w in pending
+        wit[w] && (evidence = _set_answer(evidence, w, Yes))
+    end
+    for w in pending
+        _answer(evidence, w) === Unknown || continue
+        evidence = _set_answer(evidence, w, _probe(u, ctx, cons, vars, ivs, w))
+    end
+    return _store!(u, ctx.key, _tighten(evidence))
 end

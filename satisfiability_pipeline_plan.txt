@@ -1,0 +1,38 @@
+DiffEqCAS Feasibility Pipeline Blueprint (redesigning the factor_evidence pipeline)
+
+requirements for satisfiability pipeline:
+1) can be used checking satisfiability of a set of constraints
+2) can be used for checking possible sign of an expression given constraints (for positive the sat problem is x<=0 and if it's unsat then x is positive)
+3) can be used to check divisibility of an expression, i.e. wether it can be equal to zero (is once again a sat problem with x==0)
+
+nice to have:
+1) inference of the answer for an expression based on caches for it's subexpressions
+
+parts of the design I want to keep:
+1) global LRUcache with keys based on context
+2) paving engine as the final step/fallback of the pipeline as a d-sat checker
+3) compute and store in cache bounds for expressions and not just satisfiability, since bounds can be used for inference interval arithmetic for quickly computing bounds for other expressions.
+
+plan:
+the pipeline is a satisfiability checker that also caches additional information on expressions as it goes, being sign attainability and outer bounds in the form of intervals, which can be used to assist making the sat checks easier for later queries or to answer questions directly from the cache.
+it follows a similar path to the current implementation (although with more normalization at first maybe):
+
+normalize (substitute equalities, canonical form) (this happens outside of the engine, queriers are responsible for this)
+ → cache lookup (own ctx, then infer from subexpression contexts if they're cached)
+ → structural (constants, known function ranges: exp>0, x^2≥0)
+ → interval arithmetic from children's cache entries
+ → algebraic zero rules (product zero iff a factor is; exp never zero, ...)
+ → expression specific strategies: affine expressions, single variable polynomials, etc...
+ → constraint propagation (HC4) (run once independently before the paving)
+ → paving (+ existence certificates)
+
+the attained info should be kept in a struct similar to:
+struct Info
+    outer::Interval
+    strict_lo::Bool        # "strictness" is
+    strict_hi::Bool
+    neg::Answer            # Answer = Yes(attainable) | No(unattainable) | Unknown
+    zero::Answer
+    pos::Answer
+    ident_zero::Bool       # only settled by the algebraic stage
+end

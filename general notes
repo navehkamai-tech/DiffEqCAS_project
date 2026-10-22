@@ -1,0 +1,2 @@
+symbolic_rules is should not actually be a single file.
+the functions defined it can go to types, and each of it's rules should go to the file that uses it.

@@ -18,6 +18,15 @@ fresh_id() = Threads.atomic_add!(_GLOBAL_ID_COUNTER, 1) + 1
 # ===========================================================================
 # 2. Symbolic Relations & Equations
 # ===========================================================================
+const _LT = Symbol("<")
+const _LE = Symbol("<=")
+const _GT = Symbol(">")
+const _GE = Symbol(">=")
+const _EQ = Symbol("==")
+const _NE = Symbol("!=")
+
+const _RELATIONS = Set(_LT, _LE, _GT, _GE, _EQ, _NE)
+
 """
     SymRelation(residual, relation)
 
@@ -27,16 +36,11 @@ struct SymRelation
     residual::Symbolics.Num
     relation::Symbol
 
-    function SymRelation(residual, relation)
-        relation_symbol = relation isa Symbol ? relation : Symbol(string(relation))
-        relation_symbol in (Symbol("!="), :>, Symbol(">="), :<, Symbol("<="), Symbol("==")) ||
-            throw(ArgumentError("unsupported symbolic restriction relation: $relation"))
-        res, rel_sym = _canonicalize_relation(residual, relation_symbol)
-        new(wrap(res), rel_sym)
+    function _unchecked_relation(residual, relation)
+        rel_sym = _relation_symbol(relation)
+        new(wrap(residual), rel_sym)
     end
 end
-
-const _restriction_relations = (Symbol("!="), :>, Symbol(">="), :<, Symbol("<="), Symbol("=="))
 
 struct SymEquation
     id::EqId
@@ -50,28 +54,28 @@ end
 # 3. Domain Types
 # ===========================================================================
 """
-    DomConstraint(id, relation)
+    Constraint(id, relation)
 
 A `SymRelation` (`residual ⋈ 0`) together with its identity. The Id is
 bookkeeping, not part of the constraint's meaning: two constraints with equal
 `relation` describe the same set no matter what their Ids are.
 """
-struct DomConstraint
+struct Constraint
     id::ConstraintId
     relation::SymRelation
 end
 
-DomConstraint(relation::SymRelation) = DomConstraint(fresh_id(), relation)
-DomConstraint(expr::Symbolics.Num) = DomConstraint(fresh_id(), SymRelation(expr))
+Constraint(relation::SymRelation) = Constraint(fresh_id(), relation)
+Constraint(expr::Symbolics.Num) = Constraint(fresh_id(), SymRelation(expr))
 
-constraint_variables(c::DomConstraint) =
+constraint_variables(c::Constraint) =
     Symbolics.get_variables(Symbolics.unwrap(c.relation.residual))
 
 # Canonical order inside a block: by content, never by Id, so a domain does
 # not depend on the order its constraints were supplied in. The Id is only a
 # final tie-break between constraints with identical content.
-_content_key(c::DomConstraint) = (string(c.relation.residual), String(c.relation.relation))
-_constraint_sort_key(c::DomConstraint) = (_content_key(c)..., c.id)
+_content_key(c::Constraint) = (string(c.relation.residual), String(c.relation.relation))
+_constraint_sort_key(c::Constraint) = (_content_key(c)..., c.id)
 
 # Binary search in a vector/tuple of constraints sorted by Id; 0 if absent.
 function _constraint_index(constraints, id::ConstraintId)
@@ -131,23 +135,23 @@ construction when invariants are already guaranteed, or `SymDomain(...)` in
 `domain_algebra.jl` for validated and canonicalized construction.
 """
 struct SymDomain
-    constraints::Vector{DomConstraint}
+    constraints::Vector{Constraint}
     blocks::Vector{DomBlock}
     variables::Vector{Symbolics.Num}
 
     global _unchecked_domain(
-        constraints::Vector{DomConstraint},
+        constraints::Vector{Constraint},
         blocks::Vector{DomBlock},
         variables::Vector{Symbolics.Num},
     ) = new(constraints, blocks, variables)
 end
 
-function _unchecked_domain(constraints::Vector{DomConstraint}, blocks::Vector{DomBlock})
+function _unchecked_domain(constraints::Vector{Constraint}, blocks::Vector{DomBlock})
     variables = Symbolics.Num[v for b in blocks for v in b.variables]
     return _unchecked_domain(constraints, blocks, variables)
 end
 
-function _unchecked_domain(constraints::Vector{DomConstraint})
+function _unchecked_domain(constraints::Vector{Constraint})
     blocks = DomBlock[]
     variables = Symbolics.Num[]
     return _unchecked_domain(constraints, blocks, variables)
@@ -184,7 +188,7 @@ struct Limit <: Locus
 end
 
 struct ExhaustiveLimit <: Locus
-    family::DomConstraint   # e.g. x^2 < R, with R -> ∞
+    family::Constraint   # e.g. x^2 < R, with R -> ∞
     param::Symbolics.Num    # e.g. R
     target::Symbolics.Num   # e.g. ∞ or 0
 end
@@ -268,7 +272,8 @@ mutable struct DESys{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symb
     eqs::E
     bcs::B
     domain::SymDomain
-    restrictions::Vector{SymRelation}
+    ps_constraints::Vector{Constraints}
+    restrictions::Vector{Constraints}
 end
 
 @enum SolutionForm EXPLICIT IMPLICIT PARAMETRIC
@@ -393,32 +398,59 @@ end
 # ===========================================================================
 # 8. Divisibility & Sign Inference Types
 # ===========================================================================
-@enum SignState positive negative iszero either undetermined
-@enum DivisState divisible haszero undetermined
+const _BI = BareInterval{Float64}
 
-"""
-    ConstraintEvidence
+@inline _bi(a::Real, b::Real) = bareinterval(Float64(a), Float64(b))
+@inline _bi(a::Real) = bareinterval(Float64(a))
+@inline _bi(x::_BI) = x
+@inline _bi(x::Interval) = bareinterval(x)
+@inline _empty_bi() = emptyinterval(_BI)
+@inline _entire_bi() = entireinterval(_BI)
 
-Internal result for the factor zero-set pipeline. The public decision is `bound`;
-`divisibility` and `sign` make numerical decisions inspectable and give later
-stages a place to return their proof object.
-"""
-struct ConstraintEvidence
-    bound::IntervalArithmetic.Interval
-    divisibility::DivisState
-    sign::SignState
+
+const _SIGNS = (:neg, :zero, :pos)
+@enum Answer Yes No Unknown
+
+struct Comp
+    constraints::Vector{Constraint}
+    variables::Vector{Symbolics.Num}
+    key::UInt64
 end
 
-"""
-    EvidenceDomain
-
-The part of a leaf's domain that bears on one expression: only the domain
-blocks that share a variable with it. Every other block is irrelevant to the
-expression and is never looked at.
-"""
-mutable struct EvidenceDomain
-    source::SymDomain
-    blocks::Vector{DomBlock}
-    key::Any
-    sub::Union{Nothing,SymDomain}
+struct Ctx
+    comps::Vector{Comp}
+    params::Vector{Constraint}
+    key::Tuple
 end
+
+const _EMPTY_CTX = Ctx(Comp[], ())
+
+Base.@kwdef struct Evidence
+    outer::_BI = _entire_bi()
+    strict_lo::Bool = false
+    strict_hi::Bool = false
+    neg::Answer = Unknown
+    zero::Answer = Unknown
+    pos::Answer = Unknown
+    ident_zero::Bool = false
+end
+
+const _EMPTY_EVIDENCE = Evidence(outer=_empty_bi(), neg=No, zero=No, pos=No)   # nothing attainable
+const _IDENT_ZERO = Evidence(outer=_bi(0.0, 0.0), neg=No, zero=Yes, pos=No, ident_zero=true)
+const _ALL = (:neg, :zero, :pos)
+
+#------------------------------------------
+# Paving & cache
+#------------------------------------------
+
+const ROI = Ref{Float64}(10000.0)
+const tolerance = Ref{Float64}(0.01)
+
+#=
+this is how to Change the global bound for this session
+DiffEqCAS.ROI[] = 50000.0
+=#
+
+const cache_size = Ref{Int64}(16384)
+global cache = LRU{Any,Any}(maxsize=cache_size[])
+

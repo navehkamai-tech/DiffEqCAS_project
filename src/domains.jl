@@ -1,20 +1,19 @@
 
-# Accept raw relations (`x > 0`), SymRelations, or DomConstraints anywhere a
+# Accept raw relations (`x > 0`), SymRelations, or Constraints anywhere a
 # constraint is expected. Raw input gets `UNASSIGNED_ID`.
-_as_constraint(c::DomConstraint) = c
-_as_constraint(x) = DomConstraint(x)
-_as_num(v) = v isa Symbolics.Num ? v : Symbolics.wrap(v)
+_as_constraint(c::Constraint) = c
+_as_constraint(x) = Constraint(x)
 
 # The hypersurface where the constraint is active (the "face" it bounds).
-active_equation(c::DomConstraint) = Symbolics.Equation(c.relation.residual, 0)
+active_equation(c::Constraint) = Symbolics.Equation(c.relation.residual, 0)
 
 # should be updated to be more sophisticated, OR should canonicalize constraints
-_same_relation(a::DomConstraint, b::DomConstraint) =
+_same_relation(a::Constraint, b::Constraint) =
     isequal(a.relation.residual, b.relation.residual) && a.relation.relation === b.relation.relation
 
 # Validated and canonicalizing constructor from constraints.
-function SymDomain(constraints::AbstractVector{DomConstraint}, blocks::AbstractVector{DomBlock})
-    sorted = sort(collect(DomConstraint, constraints), by=c -> c.id)
+function SymDomain(constraints::AbstractVector{Constraint}, blocks::AbstractVector{DomBlock})
+    sorted = sort(collect(Constraint, constraints), by=c -> c.id)
     unique!(c->c.id, sorted)
 
     claimed = falses(length(sorted))
@@ -82,12 +81,12 @@ constraints_of(domain::SymDomain, block::DomBlock) =
 # ---------------------------------------------------------------------------
 function _prune_block_constraints(
     variables::Vector{Symbolics.Num},
-    constraints::Vector{DomConstraint},
+    constraints::Vector{Constraint},
     new_ids::Set{ConstraintId};
     throw_on_infeasible::Bool=true,
 )
     # Pass 1: Collapse constraints sharing the exact same canonical residual
-    deduped = DomConstraint[]
+    deduped = Constraint[]
     for c in constraints
         idx = findfirst(existing -> isequal(existing.relation.residual, c.relation.residual), deduped)
         if idx === nothing
@@ -103,11 +102,11 @@ function _prune_block_constraints(
                 continue
             elseif combined_mask == _rel_mask(c.relation.relation)
                 keep_id = existing.id in new_ids ? c.id : existing.id
-                deduped[idx] = DomConstraint(keep_id, c.relation)
+                deduped[idx] = Constraint(keep_id, c.relation)
                 push!(new_ids, keep_id)
             else
                 merged_rel = SymRelation(existing.relation.residual, _mask_to_rel(combined_mask))
-                deduped[idx] = DomConstraint(existing.id, merged_rel)
+                deduped[idx] = Constraint(existing.id, merged_rel)
                 push!(new_ids, existing.id)
             end
         end
@@ -123,7 +122,7 @@ function _prune_block_constraints(
         if c.id in new_ids
             others = [active[j] for j in eachindex(active) if j != i]
             if isempty(others)
-                unconstrained_dom = _unchecked_domain(DomConstraint[], [DomBlock(variables, ConstraintId[])], variables)
+                unconstrained_dom = _unchecked_domain(Constraint[], [DomBlock(variables, ConstraintId[])], variables)
                 status = relation_status(c.relation, unconstrained_dom)
                 if status === :infeasible
                     throw_on_infeasible || return nothing
@@ -191,7 +190,7 @@ function domain_product(domain1::SymDomain, domain2::SymDomain)
     isempty(intersect(domain1.variables, domain2.variables)) || throw(ArgumentError("domains must have different variables"))
     # the constructor re-sorts and rejects clashing constraint Ids
     return SymDomain(
-        DomConstraint[domain1.constraints..., domain2.constraints...],
+        Constraint[domain1.constraints..., domain2.constraints...],
         DomBlock[domain1.blocks..., domain2.blocks...])
 end
 Base.:*(domain1::SymDomain, domain2::SymDomain) = domain_product(domain1, domain2)
@@ -216,7 +215,7 @@ function _classify_non_iv_relation(rel::SymRelation)
         return op(val, 0) ? :true : :false
     end
     # Has symbolic parameters/constants but no ivs
-    ev = _infer_tree(rel.residual, EvidenceDomain(_unchecked_domain(DomConstraint[]), DomBlock[], (), nothing))
+    ev = _infer_tree(rel.residual, EvidenceDomain(_unchecked_domain(Constraint[]), DomBlock[], (), nothing))
     lo, hi = inf(ev.bound), sup(ev.bound)
     op = _get_relation(rel)
     if (op === (>) && lo > 0) || (op === (>=) && lo >= 0) || (op === (<) && hi < 0) || (op === (<=) && hi <= 0) || (op === (==) && lo == 0 && hi == 0) || (op === (!=) && (lo > 0 || hi < 0))
@@ -240,9 +239,9 @@ function add_constraints(
     isempty(new_constraints) && return original
 
     # Start with existing blocks as mutable groups: (vars_vec, constraints_vec, touched_flag)
-    groups = Vector{Tuple{Vector{Symbolics.Num},Vector{DomConstraint},Bool}}()
+    groups = Vector{Tuple{Vector{Symbolics.Num},Vector{Constraint},Bool}}()
     for block in original.blocks
-        push!(groups, (copy(block.variables), collect(DomConstraint, constraints_of(original, block)), false))
+        push!(groups, (copy(block.variables), collect(Constraint, constraints_of(original, block)), false))
     end
 
     new_ids = Set{ConstraintId}()
@@ -267,7 +266,7 @@ function add_constraints(
         intersecting = findall(g -> any(v -> _contains_equal(g[1], v), c_vars), groups)
 
         if isempty(intersecting)
-            push!(groups, (c_vars, DomConstraint[constraint], true))
+            push!(groups, (c_vars, Constraint[constraint], true))
         else
             first_idx = first(intersecting)
             _push_unique!(groups[first_idx][1], c_vars)
@@ -283,7 +282,7 @@ function add_constraints(
     end
 
     # Prune redundant constraints only in touched groups
-    all_constraints_out = DomConstraint[]
+    all_constraints_out = Constraint[]
     blocks_out = DomBlock[]
 
     for (vars, cs, touched) in groups
@@ -308,8 +307,8 @@ split components). This is what keeps boundary-condition references valid
 through coordinate transforms and simplification.
 """
 function rewrite_constraints(f, domain::SymDomain, ivs=nothing)
-    rewritten = DomConstraint[DomConstraint(c.id, f(c.relation)) for c in all_constraints(domain)]
-    return share_blocks(add_constraints(domain_from_constraints(DomConstraint[], ivs), rewritten, ivs), domain)
+    rewritten = Constraint[Constraint(c.id, f(c.relation)) for c in all_constraints(domain)]
+    return share_blocks(add_constraints(domain_from_constraints(Constraint[], ivs), rewritten, ivs), domain)
 end
 
 # ---------------------------------------------------------------------------
@@ -319,7 +318,7 @@ end
     domain_from_constraints(constraints; variables=(), fresh_id=nothing)
 
 Build a domain from bare constraints (`x > 0`, `x^2 + y^2 < 1`, SymRelations or
-DomConstraints); the blocks are found automatically as the connected groups of
+Constraints); the blocks are found automatically as the connected groups of
 variables. `variables` declares variables that have no constraint at all (an
 unbounded block). Without `fresh_id` the constraints carry provisional Ids;
 pass e.g. `() -> next_constraint_id!(tree)` to register them right away.
@@ -335,13 +334,13 @@ function domain_from_constraints(constraints; variables=())
         push!(blocks, DomBlock([n], ConstraintId[]))
     end
 
-    skeleton = _unchecked_domain(DomConstraint[], blocks, seen)
+    skeleton = _unchecked_domain(Constraint[], blocks, seen)
     return add_constraints(skeleton, constraints)
 end
 
 # 2. `SymDomain(constraints)` for bare constraints is now a 1-liner:
 function SymDomain(constraints::Union{AbstractVector,Tuple})
-    isempty(constraints) && return _unchecked_domain(DomConstraint[], DomBlock[], Symbolics.Num[])
+    isempty(constraints) && return _unchecked_domain(Constraint[], DomBlock[], Symbolics.Num[])
     return domain_from_constraints(constraints)
 end
 # What `DESys(domain=...)` accepts: a SymDomain, `key => constraints` pairs,
@@ -362,7 +361,7 @@ shared, so their pavings come along.
 function subdomain(domain::SymDomain, blocks)
     block_vec = DomBlock[b for b in blocks]
     sort!(block_vec, by=b -> string(b.variables[begin]))
-    constraints = DomConstraint[c for b in block_vec for c in constraints_of(domain, b)]
+    constraints = Constraint[c for b in block_vec for c in constraints_of(domain, b)]
     sort!(constraints, by=c -> c.id)
     variables = Symbolics.Num[v for b in block_vec for v in b.variables]
     return _unchecked_domain(constraints, block_vec, variables)
@@ -434,7 +433,7 @@ end
 """
 function _rebuild_domain(domain::SymDomain, touched, rewrite, mapped_variables)
     all_vars = Symbolics.Num[]
-    constraints = DomConstraint[]
+    constraints = Constraint[]
     for block in domain.blocks
         is_touched = touched(block)
         vars = is_touched ? mapped_variables(block) : block.variables
@@ -442,7 +441,7 @@ function _rebuild_domain(domain::SymDomain, touched, rewrite, mapped_variables)
             _push_unique!(all_vars, (_as_num(v),))
         end
         for c in constraints_of(domain, block)
-            push!(constraints, is_touched ? DomConstraint(c.id, rewrite(c.relation)) : c)
+            push!(constraints, is_touched ? Constraint(c.id, rewrite(c.relation)) : c)
         end
     end
     rebuilt = domain_from_constraints(constraints; variables=all_vars)
