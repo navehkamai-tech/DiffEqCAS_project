@@ -24,3 +24,7 @@ docs/site/
 *.so
 *.dylib
 *.dll
+
+# my graphs and graph utils
+*.graphml
+cycle_checker.jl
