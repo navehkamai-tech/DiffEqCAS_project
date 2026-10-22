@@ -4,6 +4,7 @@
 
 _answer(i::Evidence, w::Symbol) = w === :neg ? i.neg : w === :zero ? i.zero : i.pos
 _decided(i::Evidence, want) = all(w -> _answer(i, w) !== Unknown, want)
+_ekey(u, ckey::Tuple) = (:evidence, u, ckey, _env())
 
 function _with(i::Evidence; outer=i.outer, strict_lo=i.strict_lo, strict_hi=i.strict_hi,
     neg=i.neg, zero=i.zero, pos=i.pos, ident_zero=i.ident_zero)
@@ -45,7 +46,7 @@ function _tighten(i::Evidence)::Evidence
     (lo > hi || (lo == hi && (slo || shi || isinf(lo)))) && return _EMPTY_EVIDENCE
     (neg === No && zer === No && pos === No) && return _EMPTY_EVIDENCE
     outer = (lo == inf(o) && hi == sup(o)) ? o : _bi(lo, hi)
-    return EVIDENCE(outer, slo, shi, neg, zer, pos, false)
+    return Evidence(outer, slo, shi, neg, zer, pos, false)
 end
 
 "Combine two sound facts about the same expression in the same context."
@@ -56,7 +57,7 @@ function _merge(a::Evidence, b::Evidence)::Evidence
     lo, slo = la > lb ? (la, a.strict_lo) : lb > la ? (lb, b.strict_lo) : (la, a.strict_lo || b.strict_lo)
     hi, shi = ha < hb ? (ha, a.strict_hi) : hb < ha ? (hb, b.strict_hi) : (ha, a.strict_hi || b.strict_hi)
     lo > hi && return _EMPTY_EVIDENCE
-    return _tighten(EVIDENCE(_bi(lo, hi), slo, shi,
+    return _tighten(Evidence(_bi(lo, hi), slo, shi,
         _join(a.neg, b.neg), _join(a.zero, b.zero), _join(a.pos, b.pos), false))
 end
 
@@ -194,7 +195,7 @@ end
 # Intersect with `a*x + c ⋈ 0`; false if the interval became empty.
 function _tighten_bound!(b::_Bnd, a::Float64, c::Float64, rel::Symbol)::Bool
     val = -c / a
-    op = a > 0 ? rel : _flip(rel)
+    op = a > 0 ? rel : _flip_relation(rel)
     if op === _LT || op === _LE
         strict = op === _LT
         if val < b.hi
@@ -256,7 +257,7 @@ function _compute_facts(comp::Comp)::CompFacts
         vars[v] = evidence
         _store!(Symbolics.unwrap(v), ckey, evidence)
     end
-    facts = CompFacts(feasible, exact, vars)
+    facts = CompFacts(feasible, exact)
     cache[(:comp, comp.key)] = facts
     return facts
 end
@@ -422,7 +423,7 @@ end
 function _cheap_evidence(u, ctx::Ctx)::Evidence
     c = _const_value(u)
     c !== nothing && return _literal_evidence(c)
-    hit = get(cache, _ikey(u, ctx.key), nothing)
+    hit = get(cache, _ekey(u, ctx.key), nothing)
     hit !== nothing && _decided(hit, _ALL) && return hit
     return _store!(u, ctx.key, _derive(u, ctx))
 end
@@ -446,7 +447,7 @@ function _hc4_refine!(comp::Comp)::Bool
         for (i, v) in enumerate(comp.variables)
             _store!(Symbolics.unwrap(v), ckey, ok ? _tighten(Evidence(outer=ivs[i])) : _EMPTY_EVIDENCE)
         end
-        ok || (cache[(:comp, comp.key)] = CompFacts(false, facts.exact, facts.vars))
+        ok || (cache[(:comp, comp.key)] = CompFacts(false, facts.exact))
     end
     cache[key] = ok
     return ok
@@ -549,7 +550,7 @@ function _probe(u, ctx::Ctx, cons, vars, ivs, w::Symbol)::Answer
     key = (:probe, u, ctx.key, w, _env())
     hit = get(cache, key, nothing)
     hit === nothing || return hit
-    extra = DomConstraint(0, SymRelation(Symbolics.wrap(u), _PROBE_REL[w]))
+    extra = Constraint(0, SymRelation(Symbolics.wrap(u), _PROBE_REL[w]))
     ans = _pave_answer(vcat(cons, [extra]), vars, ivs)
     cache[key] = ans
     return ans
@@ -610,7 +611,7 @@ end
 """
     expr_evidence(expr, src; want=(:neg,:zero,:pos)) -> Evidence
  
-`src` is a `SymDomain`, a vector of `DomConstraint`, or the result of
+`src` is a `SymDomain`, a vector of `Constraint`, or the result of
 `constraint_components`. Only the answers listed in `want` are pursued; the
 others are filled in if they came free. The context itself is assumed
 satisfiable; `No` means context ∧ probe is unsatisfiable.
@@ -672,7 +673,7 @@ function satisfiable(src)::Answer
 end
 
 satisfiable(domain::SymDomain, extra::AbstractVector{SymRelation}=SymRelation[]) =
-    satisfiable(vcat(domain.constraints, DomConstraint[DomConstraint(0, r) for r in extra]))
+    satisfiable(vcat(domain.constraints, Constraint[Constraint(0, r) for r in extra]))
 
 _all_no(expr, ctx::Ctx, fields) =
     all(f -> _answer(_expr_evidence(expr, ctx, (f,)), f) === No, fields)
@@ -706,14 +707,6 @@ function factor_divisible(factor, sys::DESys)::Bool
     ctx = _ctx_for(_components(sys.domain.constraints), _vars_of(factor))
     _contains_equal(sys.ps, factor) && isempty(ctx.comps) && return true
     return _answer(_expr_evidence(factor, ctx, (:zero,)), :zero) === No
-end
-
-# Does `expr` mention a dependent variable or a derivative?
-function _has_depvar_or_diff(expr, sys::DESys)
-    dvs = [Symbolics.unwrap(d) for d in sys.dvs]
-    walk(e) = any(d -> isequal(d, e), dvs) ||
-        (SU.iscall(e) && (SU.operation(e) isa Differential || any(walk, SU.arguments(e))))
-    return walk(Symbolics.unwrap(expr))
 end
 
 function _can_divide_by(expr::Symbolics.Num, sys::DESys)

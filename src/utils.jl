@@ -36,6 +36,14 @@ function D(vars...)
     return expr -> foldr((v, ex) -> Differential(v)(ex), sorted_vars, init=expr)
 end
 
+# Does `expr` mention a dependent variable or a derivative?
+function _has_depvar_or_diff(expr, sys::DESys)
+    dvs = [Symbolics.unwrap(d) for d in sys.dvs]
+    walk(e) = any(d -> isequal(d, e), dvs) ||
+        (SU.iscall(e) && (SU.operation(e) isa Differential || any(walk, SU.arguments(e))))
+    return walk(Symbolics.unwrap(expr))
+end
+
 function compute_J_inv(var_exprs, new_vars)
     J_T = transpose(jacobian(var_exprs, new_vars))
     J_inv = inv(Matrix(J_T))
@@ -97,20 +105,6 @@ function get_base_op(expr)
         return op
     end
     return expr
-end
-
-_lit_interval(v::Union{Integer,AbstractFloat}) = _bi(v)
-function _lit_interval(v::Real)             # Rational / Irrational: widen by an ulp
-    x = Float64(v)
-    return _bi(prevfloat(x), nextfloat(x))
-end
-
-function _literal_evidence(v::Real)::Evidence
-    isfinite(v) || return Evidence()
-    v == 0 && return _IDENT_ZERO
-    iv = _lit_interval(v)
-    return v > 0 ? Evidence(outer=iv, neg=No, zero=No, pos=Yes) :
-           Evidence(outer=iv, neg=Yes, zero=No, pos=No)
 end
 
 """
@@ -328,7 +322,7 @@ _env() = (ROI[], tolerance[])
 
 # Key constructors. Every block / context key in the file is built here only.
 # Constraint key: content hash of residual + relation (no Ids, no printing).
-_ckey(c::DomConstraint) = hash(Symbolics.unwrap(c.relation.residual), hash(c.relation.relation))
+_ckey(c::Constraint) = hash(Symbolics.unwrap(c.relation.residual), hash(c.relation.relation))
 # Block key: hash of its constraint keys, which must already be in canonical order.
 _comp_key(constraint_keys) = hash(Tuple(constraint_keys))
 # Context key: the keys of its blocks (blocks are kept sorted by key).
@@ -336,4 +330,5 @@ _ctx_key(comps) = Tuple(c.key for c in comps)
 # A context made of exactly one block.
 _ctx_key(comp::Comp) = (comp.key,)
 
-_ekey(u, ckey::Tuple) = (:evidence, u, ckey, _env())
+
+const _EMPTY_CTX = Ctx(Comp[], Constraint[], ())

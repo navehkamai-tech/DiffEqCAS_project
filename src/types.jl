@@ -25,7 +25,7 @@ const _GE = Symbol(">=")
 const _EQ = Symbol("==")
 const _NE = Symbol("!=")
 
-const _RELATIONS = Set(_LT, _LE, _GT, _GE, _EQ, _NE)
+const _RELATIONS = Set([_LT, _LE, _GT, _GE, _EQ, _NE])
 
 """
     SymRelation(residual, relation)
@@ -90,21 +90,6 @@ function _constraint_index(constraints, id::ConstraintId)
 end
 
 """
-    Paving(interior, boundary, roi, tolerance)
-
-Branch-and-prune result for one domain block: boxes certainly inside, and
-boxes too small to classify (the boundary). `roi` and `tolerance` record the
-global settings it was computed with, so a paving made under other settings is
-recomputed rather than reused. Deliberately not parametrized: an empty paving
-has no box type to infer from.
-"""
-struct Paving
-    interior::Vector{<:IntervalBoxes.IntervalBox}
-    boundary::Vector{<:IntervalBoxes.IntervalBox}
-    roi::Float64
-    tolerance::Float64
-end
-"""
     DomBlock(variables, constraint_ids, [paving])
 
 One block of a domain: a set of variables together with the
@@ -115,11 +100,7 @@ in `SymDomain.constraints`.
 mutable struct DomBlock
     variables::Vector{Symbolics.Num}      # canonical order (by string)
     constraint_ids::Vector{ConstraintId}  # canonical order (by content)
-    paving::Union{Nothing,Paving}
 end
-
-DomBlock(variables::Vector{Symbolics.Num}, constraint_ids::Vector{ConstraintId}) =
-    DomBlock(variables, constraint_ids, nothing)
 
 """
     SymDomain
@@ -272,8 +253,8 @@ mutable struct DESys{I<:AbstractVector{<:Symbolics.Num},D<:AbstractVector{<:Symb
     eqs::E
     bcs::B
     domain::SymDomain
-    ps_constraints::Vector{Constraints}
-    restrictions::Vector{Constraints}
+    ps_constraints::Vector{Constraint}
+    restrictions::Vector{Constraint}
 end
 
 @enum SolutionForm EXPLICIT IMPLICIT PARAMETRIC
@@ -422,8 +403,6 @@ struct Ctx
     params::Vector{Constraint}
     key::Tuple
 end
-
-const _EMPTY_CTX = Ctx(Comp[], ())
 
 Base.@kwdef struct Evidence
     outer::_BI = _entire_bi()
