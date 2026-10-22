@@ -2,12 +2,13 @@ module Constants
 using Symbolics
 import DynamicQuantities as DQ
 import Base.MathConstants as MC
+import ModelingToolkit: @parameters
 
 # Define custom metadata keys
 struct ConstantValue end
 
 # Mathematical Constants
-@parameters π=MC.pi e=MC.e γ=MC.eulergamma φ=MC.golden G=MC.catalan
+@parameters π=MC.pi e=MC.e γ=MC.eulergamma φ=MC.golden catalan=MC.catalan
 
 # Light speed
 @parameters c_0 = 299_792_458 [unit=DQ.m/DQ.s]
@@ -32,7 +33,7 @@ const k_b = k_B
 @parameters N_A = 6.02214076e23 [unit=DQ.mol^-1]
 
 # Luminous efficacy of 540 THz radiation (lm / W)
-@parameters K_cd = 683 [unit=DQ.lm/DQ.W]
+@parameters K_cd = 683 [unit=DQ.cd/DQ.W]
 
 # Hyperfine transition frequency of Cs-133 (Hz)
 @parameters Δν_Cs = 9_192_631_770 [unit=DQ.Hz]

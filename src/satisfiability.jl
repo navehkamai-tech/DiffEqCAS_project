@@ -5,6 +5,8 @@
 _answer(i::Evidence, w::Symbol) = w === :neg ? i.neg : w === :zero ? i.zero : i.pos
 _decided(i::Evidence, want) = all(w -> _answer(i, w) !== Unknown, want)
 _ekey(u, ckey::Tuple) = (:evidence, u, ckey, _env())
+_fkey(comp::Comp) = (:comp, comp.key, _env())
+_hkey(comp::Comp) = (:hc4, comp.key, _env())
 
 function _with(i::Evidence; outer=i.outer, strict_lo=i.strict_lo, strict_hi=i.strict_hi,
     neg=i.neg, zero=i.zero, pos=i.pos, ident_zero=i.ident_zero)
@@ -95,7 +97,7 @@ const _STATUS_RULES = Dict{Symbol,Tuple{Tuple,Tuple}}(
 "Split constraints into connected blocks for the engine."
 function _components(constraints)::Vector{Comp}
     comps = Comp[
-        Comp(g.constraints, g.variables, Set(g.variables), hash(Tuple(g.keys)))
+        Comp(g.constraints, g.variables, hash(Tuple(g.keys)))
         for g in _connected_groups(constraints)
     ]
     sort!(comps, by=c -> c.key)
@@ -109,10 +111,9 @@ _as_comps(cs::AbstractVector{<:Constraint}) = _components(cs)
 "Precompute the blocks of a domain / constraint list when asking many queries."
 constraint_components(src) = _as_comps(src)
 
-function _ctx_for(comps::Vector{Comp}, vars)::Ctx
+function _ctx_for(comps::Vector{Comp}, vars, params=Constraint[])::Ctx
     keep = Comp[c for c in comps if any(v -> v in c.variables, vars)]
-    length(keep) == length(ctx.comps) && return ctx
-    return Ctx(keep, _ctx_key(keep))
+    return Ctx(keep, params, _ctx_key(keep))
 end
 
 # The part of `ctx` that bears on a sub-expression.
@@ -258,12 +259,12 @@ function _compute_facts(comp::Comp)::CompFacts
         _store!(Symbolics.unwrap(v), ckey, evidence)
     end
     facts = CompFacts(feasible, exact)
-    cache[(:comp, comp.key)] = facts
+    cache[_fkey(comp)] = facts
     return facts
 end
 
 function _facts(comp::Comp)::CompFacts
-    hit = get(cache, (:comp, comp.key), nothing)
+    hit = get(cache, _fkey(comp), nothing)
     return hit === nothing ? _compute_facts(comp) : hit
 end
 
@@ -435,21 +436,22 @@ end
 # Contract a block's variable bounds once; refined bounds go into the cache so
 # every later query in the block benefits. false = block proven infeasible.
 function _hc4_refine!(comp::Comp)::Bool
-    key = (:hc4, comp.key)
-    hit = get(cache, key, nothing)
-    hit === nothing || return hit
     facts = _facts(comp)
-    ok = facts.feasible
-    if ok && !facts.exact
-        ckey = _ctx_key(comp)
-        ivs = _BI[_leaf_evidence(v, comp).outer for v in comp.variables]
-        ok, ivs = _contract(comp.constraints, comp.variables, ivs)
-        for (i, v) in enumerate(comp.variables)
-            _store!(Symbolics.unwrap(v), ckey, ok ? _tighten(Evidence(outer=ivs[i])) : _EMPTY_EVIDENCE)
-        end
-        ok || (cache[(:comp, comp.key)] = CompFacts(false, facts.exact))
+    facts.feasible || return false
+    facts.exact && return true
+    key = _hkey(comp)
+    res = get(cache, key, nothing)
+    if res === nothing
+        ivs = _BI[facts.vars[v].outer for v in comp.variables]
+        res = _contract(comp.constraints, comp.variables, ivs)
+        cache[key] = res
     end
-    cache[key] = ok
+    ok, ivs = res
+    ok || (cache[_fkey(comp)] = CompFacts(false, facts.exact, facts.vars))
+    ckey = _ctx_key(comp)
+    for (i, v) in enumerate(comp.variables)
+        _store!(Symbolics.unwrap(v), ckey, ok ? _tighten(Evidence(outer=ivs[i])) : _EMPTY_EVIDENCE)
+    end
     return ok
 end
 
@@ -551,7 +553,7 @@ function _probe(u, ctx::Ctx, cons, vars, ivs, w::Symbol)::Answer
     hit = get(cache, key, nothing)
     hit === nothing || return hit
     extra = Constraint(0, SymRelation(Symbolics.wrap(u), _PROBE_REL[w]))
-    ans = _pave_answer(vcat(cons, [extra]), vars, ivs)
+    ans = _pave_answer(vcat([extra], cons), vars, ivs)
     cache[key] = ans
     return ans
 end

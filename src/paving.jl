@@ -679,6 +679,7 @@ function _pave_constraints(box::IntervalBox{N,T}, constraints, variables, epsilo
     num_c = length(tapes)
     all_active_mask = num_c <= 64 ? ((UInt64(1) << num_c) - UInt64(1)) : UInt64(0)
     use_mask = num_c <= 64
+    use_mask || throw(ArgumentError("Too many constraints ($num_c) for bitmasking; maximum supported is 64."))
 
     working = Tuple{IntervalBox{N,T},UInt64}[(box, all_active_mask)]
     inner = IntervalBox{N,T}[]
@@ -788,6 +789,10 @@ function _pave_boxes(cons, vars, ivs::Vector{_BI})
     dropped = length(usable) < length(cons)
     ok, ivs = _contract(usable, vars, ivs)
     ok || return false, Any[], Any[], dropped
+    if length(usable) > 64
+        usable = usable[1:64]
+        dropped=true
+    end
     inner, boundary = _pave_constraints(IntervalBox(Tuple(ivs)), usable, vars, tolerance[])
     return !(isempty(inner) && isempty(boundary)), inner, boundary, dropped
 end

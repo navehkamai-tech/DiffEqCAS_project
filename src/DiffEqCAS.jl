@@ -24,8 +24,6 @@ import Symbolics: unwrap, wrap, jacobian, simplify, substitute, get_variables
 import SymbolicUtils as SU
 import SymbolicUtils: maketerm, @rule, @acrule
 import Base.MathConstants as MC
-import ModelingToolkit: VariableUnit
-
 # ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
@@ -99,9 +97,5 @@ include("transformations.jl")
 # final part, governs the system as a whole
 include("special_algorithms.jl")
 include("derivation_tree.jl")
-
-function __init__()
-    Unitful.register(DiffEqCAS)
-end
 
 end # module DiffEqCAS

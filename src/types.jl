@@ -36,10 +36,55 @@ struct SymRelation
     residual::Symbolics.Num
     relation::Symbol
 
-    function _unchecked_relation(residual, relation)
-        rel_sym = _relation_symbol(relation)
-        new(wrap(residual), rel_sym)
+    global _unchecked_relation(residual, relation) = new(residual, _relation_symbol(relation))
+end
+
+function _canonicalize_relation(residual, rel_sym::Symbol)
+    expr = Symbolics.unwrap(simplify(expand(wrap(residual))))
+    val = SU.unwrap_const(expr)
+    val isa Real && return (wrap(sign(val)), rel_sym)
+
+    vars = Symbolics.get_variables(expr)
+    isempty(vars) && return (wrap(expr), rel_sym)
+
+    # Prefer true independent variables over parameters/constants, sorted alphabetically
+    ivs = filter(v -> !ModelingToolkit.isparameter(Symbolics.unwrap(v)) &&
+        !ModelingToolkit.isconstant(Symbolics.unwrap(v)), vars)
+    target_vars = isempty(ivs) ? vars : ivs
+    sort!(target_vars, by=string)
+    lead_var = Symbolics.unwrap(first(target_vars))
+
+    # Extract coefficient of highest power of `lead_var`
+    deg = Symbolics.degree(expr, lead_var)
+    lead_term = deg > 0 ? Symbolics.coeff(expr, deg == 1 ? lead_var : lead_var^deg) : expr
+    c = _numeric_factor(lead_term)
+
+    if c isa Real && !iszero(c)
+        # Normalize magnitude and force leading numeric coefficient to be positive
+        expr = simplify(expand(wrap(expr) / abs(c)))
+        if c < 0
+            expr = simplify(expand(-expr))
+            rel_sym = _flip_relation(rel_sym)
+        end
+    else
+        expr = wrap(expr)
     end
+    return (expr, rel_sym)
+end
+
+function SymRelation(residual, relation)
+    res, rel_sym = _canonicalize_relation(residual, _relation_symbol(relation))
+    return _unchecked_relation(res, rel_sym)
+end
+
+# `x > 1`  ->  SymRelation(x - 1, :>)
+function SymRelation(expr::Symbolics.Num)
+    unwrapped = Symbolics.unwrap(expr)
+    SU.iscall(unwrapped) ||
+        throw(ArgumentError("must be an expression"))
+    op = _relation_symbol(SU.operation(unwrapped), "a SymRelation must be a relation such as `x > 0`, got")
+    lhs, rhs = SU.arguments(unwrapped)
+    return SymRelation(wrap(lhs) - wrap(rhs), op)
 end
 
 struct SymEquation
@@ -384,7 +429,7 @@ const _BI = BareInterval{Float64}
 @inline _bi(a::Real, b::Real) = bareinterval(Float64(a), Float64(b))
 @inline _bi(a::Real) = bareinterval(Float64(a))
 @inline _bi(x::_BI) = x
-@inline _bi(x::Interval) = bareinterval(x)
+@inline _bi(x::IntervalArithmetic.Interval) = bareinterval(x)
 @inline _empty_bi() = emptyinterval(_BI)
 @inline _entire_bi() = entireinterval(_BI)
 

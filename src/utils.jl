@@ -325,8 +325,10 @@ _env() = (ROI[], tolerance[])
 _ckey(c::Constraint) = hash(Symbolics.unwrap(c.relation.residual), hash(c.relation.relation))
 # Block key: hash of its constraint keys, which must already be in canonical order.
 _comp_key(constraint_keys) = hash(Tuple(constraint_keys))
+# Parameter key: the keys of its constraints (constraints are kept sorted by key).
+_pkey(constraints) = Tuple(c.key for c in constraints)
 # Context key: the keys of its blocks (blocks are kept sorted by key).
-_ctx_key(comps) = Tuple(c.key for c in comps)
+_ctx_key(comps, params) = Tuple((c.key for c in comps)..., _pkey(params))
 # A context made of exactly one block.
 _ctx_key(comp::Comp) = (comp.key,)
 
