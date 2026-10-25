@@ -8,6 +8,10 @@ _ekey(u, ckey::Tuple) = (:evidence, u, ckey, _env())
 _fkey(comp::Comp) = (:comp, comp.key, _env())
 _hkey(comp::Comp) = (:hc4, comp.key, _env())
 
+_to_answer(s::Symbol)::Answer = s === :sat ? Yes : s === :unsat ? No : Unknown
+
+_make_box(ivs::Vector{_BI}) = IntervalBox(ivs)
+
 function _with(i::Evidence; outer=i.outer, strict_lo=i.strict_lo, strict_hi=i.strict_hi,
     neg=i.neg, zero=i.zero, pos=i.pos, ident_zero=i.ident_zero)
     return Evidence(outer, strict_lo, strict_hi, neg, zero, pos, ident_zero)
@@ -18,6 +22,13 @@ _set_answer(i::Evidence, w::Symbol, a::Answer) =
 
 _join(x::Answer, y::Answer) = x === y ? x : x === Unknown ? y : y === Unknown ? x : No
 
+function _rel_from_want(want::Symbol)
+    want === :neg && return _LT
+    want === :zero && return _EQ
+    want === :pos && return _GT
+    error("invalid want: $want")
+end
+
 """
 Make an Evidence self-consistent: answers follow from the interval and the interval
 follows from the answers. Contradictions collapse to the empty Evidence.
@@ -25,7 +36,7 @@ follows from the answers. Contradictions collapse to the empty Evidence.
 function _tighten(i::Evidence)::Evidence
     i.ident_zero && return _IDENT_ZERO
     o = i.outer
-    isempty(o) && return _EMPTY_EVIDENCE
+    isempty_interval(o) && return _EMPTY_EVIDENCE
     lo, hi = inf(o), sup(o)
     slo = i.strict_lo || lo == -Inf
     shi = i.strict_hi || hi == Inf
@@ -54,7 +65,7 @@ end
 "Combine two sound facts about the same expression in the same context."
 function _merge(a::Evidence, b::Evidence)::Evidence
     (a.ident_zero || b.ident_zero) && return _IDENT_ZERO
-    (isempty(a.outer) || isempty(b.outer)) && return _EMPTY_EVIDENCE
+    (isempty_interval(a.outer) || isempty_interval(b.outer)) && return _EMPTY_EVIDENCE
     la, lb, ha, hb = inf(a.outer), inf(b.outer), sup(a.outer), sup(b.outer)
     lo, slo = la > lb ? (la, a.strict_lo) : lb > la ? (lb, b.strict_lo) : (la, a.strict_lo || b.strict_lo)
     hi, shi = ha < hb ? (ha, a.strict_hi) : hb < ha ? (hb, b.strict_hi) : (ha, a.strict_hi || b.strict_hi)
@@ -93,7 +104,6 @@ const _STATUS_RULES = Dict{Symbol,Tuple{Tuple,Tuple}}(
 #----------------------------------------------------------
 # Components & Context
 # ----------------------------------------------------------
-
 "Split constraints into connected blocks for the engine."
 function _components(constraints)::Vector{Comp}
     comps = Comp[
@@ -112,7 +122,7 @@ _as_comps(cs::AbstractVector{<:Constraint}) = _components(cs)
 constraint_components(src) = _as_comps(src)
 
 function _ctx_for(comps::Vector{Comp}, vars, params=Constraint[])::Ctx
-    keep = Comp[c for c in comps if any(v -> v in c.variables, vars)]
+    keep = Comp[c for c in comps if any(_in(c.variables), vars)]
     return Ctx(keep, params, _ctx_key(keep))
 end
 
@@ -121,7 +131,7 @@ function _restrict_ctx(ctx::Ctx, expr)::Ctx
     isempty(ctx.comps) && return ctx
     vs = _vars_of(expr)
     isempty(vs) && return _EMPTY_CTX
-    return _ctx_for(ctx, vs)
+    return _ctx_for(ctx.comps, vs)
 end
 
 _ctx_constraints(ctx::Ctx) = vcat(Constraint[c for comp in ctx.comps for c in comp.constraints], Constraint[c for c in ctx.params])
@@ -140,6 +150,16 @@ _Bnd() = _Bnd(-Inf, Inf, false, false)
 struct CompFacts
     exact::Bool
     feasible::Bool
+    algebraic::Bool
+end
+
+# Result of contracting a block once with HC4 (cached under `_hkey(comp)`).
+#   :unsat   block infeasible
+#   :sat     every constraint inside-and-defined on `box` (box is non-empty)
+#   :unknown contracted, undecided
+struct _Hc4Result
+    status::Symbol
+    box::Vector{_BI}
 end
 
 # update to handle parameters by querying the context and the cache
@@ -220,6 +240,15 @@ function _tighten_bound!(b::_Bnd, a::Float64, c::Float64, rel::Symbol)::Bool
     return b.lo < b.hi || (b.lo == b.hi && !b.slo && !b.shi)
 end
 
+function _bounded(box::IntervalBox)
+    for i in 1:length(box)
+        if isinf(sup(box[i])) || isinf(inf(box[i]))
+            return false
+        end
+    end
+    return true
+end
+
 function _bound_evidence(b::_Bnd, exact::Bool)::Evidence
     neg = exact && b.lo < 0 ? Yes : Unknown
     pos = exact && b.hi > 0 ? Yes : Unknown
@@ -228,6 +257,7 @@ function _bound_evidence(b::_Bnd, exact::Bool)::Evidence
     return _tighten(Evidence(_bi(b.lo, b.hi), b.slo, b.shi, neg, zer, pos, false))
 end
 
+# FIX: CompFacts is (exact, feasible, algebraic); the old call had the first two swapped.
 function _compute_facts(comp::Comp)::CompFacts
     ckey = (comp.key,)
     bnds = Dict{Symbolics.Num,_Bnd}(v => _Bnd() for v in comp.variables)
@@ -258,7 +288,8 @@ function _compute_facts(comp::Comp)::CompFacts
         vars[v] = evidence
         _store!(Symbolics.unwrap(v), ckey, evidence)
     end
-    facts = CompFacts(feasible, exact)
+    algebraic = all(c -> _is_algebraic(c.relation.residual), comp.constraints)
+    facts = CompFacts(exact, feasible, algebraic)
     cache[_fkey(comp)] = facts
     return facts
 end
@@ -272,7 +303,11 @@ end
 function _leaf_evidence(v::Symbolics.Num, comp::Comp)::Evidence
     facts = _facts(comp)
     facts.feasible || return _EMPTY_EVIDENCE
-    return get(cache, _ekey(Symbolics.unwrap(v), _ctx_key(comp)), facts.vars[v])
+    key = _ekey(Symbolics.unwrap(v), _ctx_key(comp))
+    hit = get(cache, key, nothing)
+    hit === nothing || return hit
+    _compute_facts(comp)                  # evicted, or new environment: republish bounds and seeds
+    return get(cache, key, Evidence())    # unreachable in practice; top is a sound last resort
 end
 
 #------------------------------------------------------------
@@ -299,11 +334,28 @@ _s_add(a::_Signs, b::_Signs) = _Signs(
     (a.zero && b.zero) || (a.pos && b.neg) || (a.neg && b.pos),
     (a.pos && _hasvals(b)) || (b.pos && _hasvals(a)))
 
-
 function _s_powint(a::_Signs, n::Int)
     n == 0 && return _Signs(false, false, _hasvals(a))
     n < 0 && return _s_powint(_s_inv(a), -n)
     return iseven(n) ? _Signs(false, a.zero, a.neg || a.pos) : a
+end
+
+# constant exponent: only the base's signs are needed
+function _s_pow(a::_Signs, p::Real)
+    if isinteger(p) && abs(p) < 1_000_000
+        return _s_powint(a, Int(p))
+    end
+    # non-integer: negative base undefined, 0^p only defined for p > 0
+    return _Signs(false, p > 0 && a.zero, a.pos)
+end
+
+# non-constant exponent: both operands are evidence
+function _s_pow(a::_Signs, b::_Signs)
+    hasb = _hasvals(b)
+    return _Signs(
+        a.neg && hasb,                          # neg^(odd integer) can be negative
+        a.zero && b.pos,                        # 0^positive = 0 (0^negative is undefined)
+        hasb && (a.pos || a.neg || (a.zero && b.zero)))  # pos^anything, neg^even, 0^0 = 1
 end
 
 function _sign_rule(op, args, kids)::_Signs
@@ -315,14 +367,14 @@ function _sign_rule(op, args, kids)::_Signs
         return reduce(_s_mul, S)
     elseif op === (/) && n == 2
         return _s_mul(S[1], _s_inv(S[2]))
-    elseif op === (^) && n == 2
-        p = _const_value(args[2])
-        if p !== nothing && isinteger(p) && abs(p) < 1_000_000
-            return _s_powint(S[1], Int(p))
-        elseif p !== nothing
-            return _Signs(false, p > 0 && S[1].zero, S[1].pos)
+    elseif op === (^)
+        p = length(args) >= 2 ? _const_value(args[2]) : nothing
+        if p !== nothing && n >= 1
+            return _s_pow(S[1], p)
+        elseif n == 2
+            return _s_pow(S[1], S[2])
         end
-        return (!S[1].neg && !S[1].zero) ? _Signs(false, false, S[1].pos) : _ANY_SIGN
+        return _ANY_SIGN
     elseif n == 1
         s = S[1]
         (op === exp || op === exp2 || op === exp10 || op === cosh) &&
@@ -354,9 +406,9 @@ function _interval_rule(op, args, kids)
     elseif op === (^) && n == 2
         p = _const_value(args[2])
         if p !== nothing && isinteger(p) && abs(p) < 1_000_000
-            return X[1]^Int(p), false, false
+            return pow(X[1], Int(p)), false, false
         end
-        return X[1]^X[2], false, false
+        return pow(X[1], X[2]), false, false
     elseif n == 1 && op in _UNARY_INTERVAL_OPS
         return op(X[1]), false, false
     end
@@ -386,7 +438,7 @@ end
 
 # Evidence for a call node from its children's Evidence (stages 2–4).
 function _combine(op, args, kids::Vector{Evidence})::Evidence
-    any(k -> isempty(k.outer), kids) && return _EMPTY_EVIDENCE
+    any(k -> isempty_interval(k.outer), kids) && return _EMPTY_EVIDENCE
     _ident_rule(op, args, kids) && return _IDENT_ZERO
     outer, slo, shi = _interval_rule(op, args, kids)
     s = _sign_rule(op, args, kids)
@@ -397,12 +449,12 @@ end
 function _derive(u, ctx::Ctx)::Evidence
     for comp in ctx.comps
         v = _as_num(u)
-        v in comp.varset && return _leaf_evidence(v, comp)
+        _in(v, comp.variables) && return _leaf_evidence(v, comp)
     end
     SU.iscall(u) || return Evidence()                       # unconstrained symbol / parameter
     op = SU.operation(u)
     args = SU.arguments(u)
-    kids = Evidence[_cheap_evidence(a, _restrict_ctx(ctx, a)) for a in args]
+    kids = Evidence[_infer_evidence(a, _restrict_ctx(ctx, a)) for a in args]
     return _combine(op, args, kids)
 end
 
@@ -421,7 +473,7 @@ function _literal_evidence(v::Real)::Evidence
 end
 
 # Stages 1–4. Never pavings, so children never trigger expensive work.
-function _cheap_evidence(u, ctx::Ctx)::Evidence
+function _infer_evidence(u, ctx::Ctx)::Evidence
     c = _const_value(u)
     c !== nothing && return _literal_evidence(c)
     hit = get(cache, _ekey(u, ctx.key), nothing)
@@ -429,156 +481,68 @@ function _cheap_evidence(u, ctx::Ctx)::Evidence
     return _store!(u, ctx.key, _derive(u, ctx))
 end
 
-# -----------------------------------------------------------
-# Paving connectors
-# -----------------------------------------------------------
-
-# Contract a block's variable bounds once; refined bounds go into the cache so
-# every later query in the block benefits. false = block proven infeasible.
-function _hc4_refine!(comp::Comp)::Bool
+"""
+    _hc4_refine!(comp) -> _Contracted
+ 
+Contract one block once (via `_contract`), cache the result under `_hkey(comp)`,
+and publish the refined variable bounds as evidence so every later query on the
+block benefits. A proven-infeasible block is also recorded in its `CompFacts`.
+The cached `_Contracted` is exactly what `_pave_contracted` needs.
+"""
+function _hc4_refine!(comp::Comp)::_Contracted
     facts = _facts(comp)
-    facts.feasible || return false
-    facts.exact && return true
+    facts.feasible || return _infeasible(length(comp.variables))
+
     key = _hkey(comp)
     res = get(cache, key, nothing)
     if res === nothing
-        ivs = _BI[facts.vars[v].outer for v in comp.variables]
-        res = _contract(comp.constraints, comp.variables, ivs)
+        ivs = _BI[_leaf_evidence(v, comp).outer for v in comp.variables]
+        res = if any(isempty_interval, ivs)
+            _infeasible(length(ivs))
+        elseif facts.exact
+            # Every constraint is a univariate affine bound, already folded into
+            # `ivs` with its strictness. HC4 cannot see strictness through a closed
+            # box, so this shortcut is needed, not just an optimisation.
+            _Contracted(:sat, ivs, UInt64(0), _NO_TAPES)
+        else
+            _contract(_make_box(ivs), comp.constraints, comp.variables)
+        end
         cache[key] = res
     end
-    ok, ivs = res
-    ok || (cache[_fkey(comp)] = CompFacts(false, facts.exact, facts.vars))
+
+    res.status === :unsat &&
+        (cache[_fkey(comp)] = CompFacts(facts.exact, false, facts.algebraic))
+
     ckey = _ctx_key(comp)
     for (i, v) in enumerate(comp.variables)
-        _store!(Symbolics.unwrap(v), ckey, ok ? _tighten(Evidence(outer=ivs[i])) : _EMPTY_EVIDENCE)
+        ev = res.status === :unsat ? _EMPTY_EVIDENCE : _tighten(Evidence(outer=res.box[i]))
+        _store!(Symbolics.unwrap(v), ckey, ev)
     end
-    return ok
+    return res
 end
 
 """
-Is there a point satisfying `cons` inside the box `ivs`?
-Yes = an inner box exists; No = nothing survives; Unknown = only boundary boxes.
+    _joint_system(comps, params, extra_vars)
+ 
+Refine every block (cached; publishes tightened bounds) and assemble the joint
+system: variables, refined boxes (`ivs`, same order) and all constraints.
+`extra_vars` that no block owns (e.g. a free variable of the probed expression) are
+added with an unbounded interval. Returns `nothing` if some block is infeasible.
 """
-function _pave_answer(cons, vars, ivs::Vector{_BI})::Answer
-    feasible, inner, boundary, dropped = _pave_boxes(cons, vars, ivs)
-    feasible || return No
-    isempty(inner) || return dropped ? Unknown : Yes
-    return isempty(boundary) ? No : Unknown
-end
+function _joint_system(comps::Vector{Comp}, params::Vector{Constraint}, extra_vars)
+    refined = _Contracted[_hc4_refine!(c) for c in comps]
+    any(r -> r.status === :unsat, refined) && return nothing
 
-function _sample_points(ivs::Vector{_BI})
-    n = length(ivs)
-    lo = [inf(i) for i in ivs]
-    hi = [sup(i) for i in ivs]
-    pts = Vector{Vector{Float64}}([(lo .+ hi) ./ 2])
-    if n <= 6
-        for m in 0:(2^n-1)
-            push!(pts, [((m >> (i - 1)) & 1) == 1 ? hi[i] : lo[i] for i in 1:n])
-        end
-    else
-        push!(pts, lo)
-        push!(pts, hi)
+    variables = Symbolics.Num[v for c in comps for v in c.variables]
+    ivs = _BI[iv for r in refined for iv in r.box]
+    for v in extra_vars
+        any(c -> _in(v, c.variables), comps) && continue
+        push!(variables, v)
+        push!(ivs, _entire_bi())
     end
-    return pts
-end
-
-const _NO_WITNESS = (neg=false, zero=false, pos=false)
-
-# Existence certificates. Points of an inner box of the context satisfy every
-# constraint; evaluating `u` there with interval arithmetic gives a rigorous sign.
-# Zero is certified by the intermediate value theorem when both signs occur in
-# one box on which `u` stays bounded (no pole).
-function _find_witnesses(u, cons, vars, ivs::Vector{_BI})
-    feasible, inner, _, dropped = _pave_boxes(cons, vars, ivs)
-    feasible || return _NO_WITNESS
-    f = SymRelation(Symbolics.wrap(u), _EQ)
-    (dropped || isempty(inner) || !_compilable(f)) && return _NO_WITNESS
-    tape = compile_hc4(f, vars)
-    ws = Vector{_BI}(undef, tape.tape_len)
-    n = length(vars)
-    boxes = length(inner) > 64 ? partialsort(inner, 1:64; by=b -> -diam(b)) : inner
-    neg = pos = zer = false
-    for B in boxes
-        bi = _BI[_bi(B[i]) for i in 1:n]
-        for i in 1:n
-            ws[i] = bi[i]
-        end
-        range = _execute_forward!(tape, ws)
-        bounded = !isempty(range) && isfinite(inf(range)) && isfinite(sup(range))
-        bn = bp = false
-        for p in _sample_points(bi)
-            for i in 1:n
-                ws[i] = _bi(p[i])
-            end
-            r = _execute_forward!(tape, ws)
-            isempty(r) && continue
-            sup(r) < 0 && (bn = true)
-            inf(r) > 0 && (bp = true)
-            inf(r) == 0 && sup(r) == 0 && (zer = true)
-        end
-        neg |= bn
-        pos |= bp
-        bounded && bn && bp && (zer = true)
-        neg && pos && zer && break
-    end
-    return (neg=neg, zero=zer, pos=pos)
-end
-
-# Variables of the paving problem and their (windowed) starting intervals.
-function _probe_space(u, ctx::Ctx)
-    vars = Symbolics.Num[]
-    seen = Set{Symbolics.Num}()
-    for comp in ctx.comps, v in comp.variables
-        v in seen || (push!(seen, v); push!(vars, v))
-    end
-    for v in _vars_of(u)
-        v in seen || (push!(seen, v); push!(vars, v))
-    end
-    ivs = _BI[_window(_var_outer(v, ctx)) for v in vars]
-    return vars, ivs
-end
-
-function _var_outer(v::Symbolics.Num, ctx::Ctx)::_BI
-    for comp in ctx.comps
-        v in comp.variables && return _leaf_evidence(v, comp).outer
-    end
-    return _entire_bi()
-end
-
-const _PROBE_REL = (neg=_LT, zero=_EQ, pos=_GT)
-
-# Is `expr ⋈ 0` (⋈ chosen by `w`) satisfiable together with the context?
-function _probe(u, ctx::Ctx, cons, vars, ivs, w::Symbol)::Answer
-    key = (:probe, u, ctx.key, w, _env())
-    hit = get(cache, key, nothing)
-    hit === nothing || return hit
-    extra = Constraint(0, SymRelation(Symbolics.wrap(u), _PROBE_REL[w]))
-    ans = _pave_answer(vcat([extra], cons), vars, ivs)
-    cache[key] = ans
-    return ans
-end
-
-# Stage 7. Witnesses first (they can settle several answers with one paving of
-# the context), then one probe paving per answer still open.
-function _stage_paving(u, ctx::Ctx, evidence::Evidence, want)::Evidence
-    pending = [w for w in want if _answer(evidence, w) === Unknown]
-    isempty(pending) && return evidence
-    cons = _ctx_constraints(ctx)
-    vars, ivs = _probe_space(u, ctx)
-    wkey = (:wit, u, ctx.key, _env())
-    wit = get(cache, wkey, nothing)
-    if wit === nothing
-        wit = _find_witnesses(u, cons, vars, ivs)
-        cache[wkey] = wit
-    end
-    for w in pending
-        wit[w] && (evidence = _set_answer(evidence, w, Yes))
-    end
-    for w in pending
-        _answer(evidence, w) === Unknown || continue
-        evidence = _set_answer(evidence, w, _probe(u, ctx, cons, vars, ivs, w))
-    end
-    return _store!(u, ctx.key, _tighten(evidence))
+    constraints = Constraint[c for comp in comps for c in comp.constraints]
+    append!(constraints, params)
+    return (variables=variables, ivs=ivs, constraints=constraints)
 end
 
 # ---------------------------------------------------------------------------
@@ -591,25 +555,53 @@ end
 
 const _STRATEGIES = Function[]
 
-
-# ---------------------------------------------------------------------------
-# 10. Public API
-# ---------------------------------------------------------------------------
 function _expr_evidence(expr, ctx::Ctx, want::Tuple)::Evidence
     u = Symbolics.unwrap(expr)
-    evidence = _cheap_evidence(u, ctx)
+    evidence = _infer_evidence(u, ctx)
     _decided(evidence, want) && return evidence
     for strategy in _STRATEGIES
         evidence = _store!(u, ctx.key, strategy(u, ctx, evidence))
         _decided(evidence, want) && return evidence
     end
-    all(_hc4_refine!, ctx.comps) || return _store!(u, ctx.key, _EMPTY_EVIDENCE)
-    evidence = _cheap_evidence(u, ctx)
+
+    # Refining the blocks publishes tighter variable bounds, so interval
+    # inference on `u` may now decide without any probe.
+    sys = _joint_system(ctx.comps, ctx.params, _vars_of(u))
+    sys === nothing && return _store!(u, ctx.key, _EMPTY_EVIDENCE)
+    evidence = _infer_evidence(u, ctx)
     _decided(evidence, want) && return evidence
-    return _stage_paving(u, ctx, evidence, want)
+
+    box = _make_box(sys.ivs)
+    miss = Symbol[]
+    for w in want
+        _answer(evidence, w) !== Unknown && continue
+        probe = Constraint(0, SymRelation(u, _rel_from_want(w)))
+        # probe first: it is the one constraint that must never be dropped
+        contracted = _contract(box, vcat(Constraint[probe], sys.constraints), sys.variables)
+        if w === :zero && contracted.status === :unknown &&
+            !contracted.prep.dropped && !isempty(contracted.prep.tapes)
+            # The probe is first, so tape 1 and its residual are the equality
+            # being queried. Do not build a certificate if anything was dropped.
+            cert = _ZeroCertificate(probe.relation.residual, sys.variables, contracted.prep.tapes[1])
+            ans = _to_answer(_pave_contracted(contracted; certify=cert))
+        else
+            ans = _to_answer(_pave_contracted(contracted))
+        end
+        if ans === Unknown
+            push!(miss, w)
+        else
+            evidence = _store!(u, ctx.key, _set_answer(evidence, w, ans))
+        end
+    end
+    isempty(miss) && return evidence
+
+    # further stages for `miss` ...
+    return _store!(u, ctx.key, _tighten(evidence))
 end
 
-
+# ---------------------------------------------------------------------------
+# 10. Public API
+# ---------------------------------------------------------------------------
 """
     expr_evidence(expr, src; want=(:neg,:zero,:pos)) -> Evidence
  
@@ -622,6 +614,7 @@ expr_evidence(expr, src; want::Tuple=_ALL) =
     _expr_evidence(expr, _ctx_for(_as_comps(src), _vars_of(expr)), want)
 
 can_be_negative(expr, src) = expr_evidence(expr, src; want=(:neg,)).neg
+# needs updating
 can_be_zero(expr, src) = expr_evidence(expr, src; want=(:zero,)).zero
 can_be_positive(expr, src) = expr_evidence(expr, src; want=(:pos,)).pos
 
@@ -629,10 +622,12 @@ function is_positive(expr, src)::Bool
     i = expr_evidence(expr, src; want=(:neg, :zero))
     return i.neg === No && i.zero === No
 end
+
 function is_negative(expr, src)::Bool
     i = expr_evidence(expr, src; want=(:pos, :zero))
     return i.pos === No && i.zero === No
 end
+
 is_nonnegative(expr, src)::Bool = can_be_negative(expr, src) === No
 is_nonpositive(expr, src)::Bool = can_be_positive(expr, src) === No
 
@@ -643,17 +638,7 @@ function _sat_comp(comp::Comp)::Answer
     key = (:sat, comp.key, _env())
     hit = get(cache, key, nothing)
     hit === nothing || return hit
-    facts = _facts(comp)
-    ans = if !facts.feasible
-        No
-    elseif facts.exact
-        Yes
-    elseif !_hc4_refine!(comp)
-        No
-    else
-        ivs = _BI[_window(_leaf_evidence(v, comp).outer) for v in comp.variables]
-        _pave_answer(comp.constraints, comp.variables, ivs)
-    end
+    ans = _to_answer(_pave_contracted(_hc4_refine!(comp)))
     cache[key] = ans
     return ans
 end

@@ -2,7 +2,7 @@
 
 julia_version = "1.13.2"
 manifest_format = "2.1"
-project_hash = "7346faa3bb7ce40059c1942fcfebad5891297154"
+project_hash = "b970992b32e69edda89a8b9be2e798398646d97e"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -234,6 +234,13 @@ registries = "General"
 uuid = "4e9b3aee-d8a1-5a3d-ad8b-7d824db253f0"
 version = "1.0.1+0"
 
+[[deps.CodeTracking]]
+deps = ["InteractiveUtils", "REPL", "UUIDs"]
+git-tree-sha1 = "cfb7a2e89e245a9d5016b70323db412b3a7438d5"
+registries = "General"
+uuid = "da1fd8a2-8d9e-5ec2-8556-3022fb5608a2"
+version = "3.0.2"
+
 [[deps.Combinatorics]]
 git-tree-sha1 = "08c8b6831dc00bfea825826be0bc8336fc369860"
 registries = "General"
@@ -408,7 +415,7 @@ version = "7.21.4"
     Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [[deps.DiffEqCAS]]
-deps = ["DataStructures", "DomainSets", "DynamicQuantities", "Integrals", "IntervalArithmetic", "IntervalBoxes", "LRUCache", "LinearAlgebra", "ModelingToolkit", "SpecialFunctions", "StaticArrays", "SymbolicLimits", "SymbolicUtils", "Symbolics", "TermInterface", "Test"]
+deps = ["DataStructures", "DomainSets", "DynamicQuantities", "Integrals", "IntervalArithmetic", "IntervalBoxes", "JuliaInterpreter", "LRUCache", "LinearAlgebra", "ModelingToolkit", "SpecialFunctions", "StaticArrays", "SymbolicLimits", "SymbolicUtils", "Symbolics", "TermInterface", "Test"]
 path = "."
 uuid = "2bd819c4-9fc0-462e-83be-792a2297597c"
 version = "0.1.0"
@@ -973,6 +980,13 @@ git-tree-sha1 = "2f05ed29618da60c06a87e9c033982d4f71d0b6c"
 registries = "General"
 uuid = "ae98c720-c025-4a4a-838c-29b094483192"
 version = "0.2.1"
+
+[[deps.JuliaInterpreter]]
+deps = ["CodeTracking", "InteractiveUtils", "Random"]
+git-tree-sha1 = "210525997a2434caa497655f86d151b1bcad0dce"
+registries = "General"
+uuid = "aa1ae85d-cabe-5617-a682-6adf51b2e16a"
+version = "0.12.0"
 
 [[deps.JuliaSyntaxHighlighting]]
 deps = ["StyledStrings"]

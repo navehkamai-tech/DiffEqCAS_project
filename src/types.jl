@@ -429,10 +429,11 @@ const _BI = BareInterval{Float64}
 @inline _bi(a::Real, b::Real) = bareinterval(Float64(a), Float64(b))
 @inline _bi(a::Real) = bareinterval(Float64(a))
 @inline _bi(x::_BI) = x
-@inline _bi(x::IntervalArithmetic.Interval) = bareinterval(x)
+@inline _bi(x::Interval) = bareinterval(x)
 @inline _empty_bi() = emptyinterval(_BI)
 @inline _entire_bi() = entireinterval(_BI)
 
+const _DI = Interval{Float64}        # decorated interval
 
 const _SIGNS = (:neg, :zero, :pos)
 @enum Answer Yes No Unknown
@@ -467,13 +468,7 @@ const _ALL = (:neg, :zero, :pos)
 # Paving & cache
 #------------------------------------------
 
-const ROI = Ref{Float64}(10000.0)
 const tolerance = Ref{Float64}(0.01)
-
-#=
-this is how to Change the global bound for this session
-DiffEqCAS.ROI[] = 50000.0
-=#
 
 const cache_size = Ref{Int64}(16384)
 global cache = LRU{Any,Any}(maxsize=cache_size[])

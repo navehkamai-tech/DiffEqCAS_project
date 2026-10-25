@@ -1,3 +1,5 @@
+# Temporary file until it's contents are redistributed among other files correctly, since it doesn't fit anywhere in the dependancies, it tries to group things wrong
+
 
 function replace_constants(ex)
     # Dynamically fetch all exported symbols from Constants (ignoring the module name itself)
@@ -37,29 +39,19 @@ end
 export @expr
 
 #symbolic rule predicate helper functions
-notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
 is_pos_param(var) = notavariable(var) && factor_sign(var) == positive
 is_neg_param(var) = notavariable(var) && factor_sign(var) == negative
-is_number(x) = x isa Number
-is_real(x) = x isa Real
-is_complex(x) = x isa Number && !(x isa Real)
+
 is_positive(x) = factor_sign(x)==positive
 is_negative(x) = factor_sign(x)==negative
 is_divisible(x) = nothing #? needs to be filled in
-is_integer(x) = x isa Integer
-is_domain(x) = x isa SymDomain
-is_rational(x) = x isa Rational
 
 
 # Rules are grouped by required assumptions and pipeline stage.  The
 # simplification pipeline can later select a safe group without enabling
 # branch-sensitive identities globally.
 
-const normalization_rules = [
-    # 1. Radical Normalization Rules    
-    @rule(sqrt(~x) => (~x)^(1//2)),
-    @rule(cbrt(~x) => (~x)^(1//3)),
-    @rule(fourthroot(~x) => (~x)^(1//4)),
+const TRIGONOMETRIC_REDUCTION_RULES = [
     # 2. Trigonometric Normalization Rules
     @rule(sec(~x) => cos(~x)^-1),
     @rule(csc(~x) => sin(~x)^-1),
@@ -68,21 +60,9 @@ const normalization_rules = [
     @rule(asec(~x) => acos(1/(~x))),
     @rule(acsc(~x) => asin(1/(~x))),
     @rule(acot(~x) => sign(~x)*asin(1/((~x)^2+1)^(1//2))),
-    # Hyperbolic Trig Normalization
-    # 3. Exact Rational Normalization
-    @rule(~n::AbstractFloat => rationalize(~n)),
-    @rule(inv(~n::is_rational) => simplify(1//(~n)))
+    @rule(sin(~x)^2 => 1//2-1//2*cos(2*~x)),
+    @rule(cos(~x)^2 => 1//2+1//2*cos(2*~x)),
 ]
-
-const NORMALIZER = SU.Postwalk(SU.PassThrough(SU.Chain(normalization_rules)))
-
-function normalize_expr(expr::Symbolics.Num)
-    return wrap(simplify(NORMALIZER(unwrap(expr))))
-end
-
-function normalize_expr(expr::Expr)
-    return simplify(NORMALIZER(expr))
-end
 
 const EXP_LOG_RULES = [
     @rule(~x/exp(~y) => ~x*exp(-~y)),
@@ -108,19 +88,7 @@ const ABSOLUTE_VALUE_RULES = [
     @rule(abs(~x::is_negative) => -~x),
     # need to add rules here for the sign function
 ]
-const TRIGONOMETRIC_RULES = [
-    @rule(sin(~x+2*Constants.π
-    ) => sin(~x)),
-    @rule(sin(~x+2 * Constants.π
-        * ~n::is_integer) => sin(~x)),
-    @rule(cos(~x+2*Constants.π
-    ) => cos(~x)),
-    @rule(cos(~x+2 * Constants.π
-        * ~n::is_integer) => cos(~x)),
-    @rule(sin(~x)^2 => 1//2-1//2*cos(2*~x)),
-    @rule(cos(~x)^2 => 1//2+1//2*cos(2*~x)),
-    @rule(tan(~x) => sin(~x)/cos(~x))
-]
+
 const SYMBOLIC_RULE_GROUPS = (
     function_arguments=vcat(EXP_LOG_RULES, TRIGONOMETRIC_RULES),
     positive_domain=vcat(POWER_RULES, ABSOLUTE_VALUE_RULES),
@@ -132,16 +100,16 @@ const SYMBOLIC_RULE_GROUPS = (
 #defining special functions
 #Dirac Delta function
 @register_symbolic Dirac(x::AbstractVector, n::Any)
-@register_symbolic Dirac(x::AbstractVector)
-@register_symbolic Dirac(x::Symbolics.Num, n::Int)
-@register_symbolic Dirac(x::Symbolics.Num)
+@register_symbolic Dirac(x::AbstractVector) false
+@register_symbolic Dirac(x::Symbolics.Num, n::Int) false
+@register_symbolic Dirac(x::Symbolics.Num) false
 #@register_symbolic Dirac(x::Symbolics.Arr, n::Any)
 #@register_symbolic Dirac(x::Symbolics.Arr)
 
 
 #Heaviside step function
 @register_symbolic Heaviside(x::AbstractVector)
-@register_symbolic Heaviside(x::Symbolics.Num)
+@register_symbolic Heaviside(x::Symbolics.Num) false
 @register_symbolic Heaviside(x::Symbolics.Arr)
 
 

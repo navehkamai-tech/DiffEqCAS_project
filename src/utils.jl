@@ -1,3 +1,15 @@
+# Generic fallback: arrays, tuples, ranges, generators, etc.
+# isequal always returns a Bool, unlike == on Symbolics variables.
+_in(x, itr) = any(y -> isequal(x, y), itr)
+
+# Sets already use isequal/hash internally, so plain `in` is safe and O(1)
+_in(x, s::AbstractSet) = x in s
+
+# Dicts: checks keys (use `_in(x, values(d))` to check values)
+_in(x, d::AbstractDict) = haskey(d, x)
+
+# Curried form, handy with any/filter/etc.
+_in(itr) = x -> _in(x, itr)
 
 _key_variables(key) = key isa Tuple ? key : (key,)
 
@@ -107,70 +119,6 @@ function get_base_op(expr)
     return expr
 end
 
-"""
-    _connected_groups(constraints; key=_ckey)
-
-Split constraints into connected groups: two constraints are in the same group
-when they share a variable, directly or through other constraints. Constraints
-with no variables each form their own group.
-
-Duplicates (same `key`) are dropped. Within a group, constraints are ordered by
-their key, and the groups themselves are ordered by their smallest key, so the
-result is deterministic and independent of the input order.
-
-Returns a vector of `(constraints, variables, keys)` named tuples, where
-`variables` is the group's unique variables in order of first appearance and
-`keys` are the constraint keys in the same order as `constraints`.
-"""
-function _connected_groups(constraints; key=_ckey)
-    seen = Set{UInt64}()
-    cs = Constraint[]
-    ks = UInt64[]
-    for c in constraints
-        k = key(c)
-        k in seen && continue
-        push!(seen, k)
-        push!(cs, c)
-        push!(ks, k)
-    end
-
-    n = length(cs)
-    parent = collect(1:n)
-    function find(i)
-        while parent[i] != i
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        end
-        return i
-    end
-
-    cvars = [_vars_of(c.relation.residual) for c in cs]
-    owner = Dict{Symbolics.Num,Int}()
-    for i in 1:n, v in cvars[i]
-        j = get!(owner, v, i)
-        j == i || (parent[find(i)] = find(j))
-    end
-
-    groups = Dict{Int,Vector{Int}}()
-    for i in 1:n
-        push!(get!(groups, find(i), Int[]), i)
-    end
-
-    result = NamedTuple{(:constraints, :variables, :keys),
-        Tuple{Vector{Constraint},Vector{Symbolics.Num},Vector{UInt64}}}[]
-    for idxs in values(groups)
-        sort!(idxs, by=i -> ks[i])
-        vars = Symbolics.Num[]
-        varset = Set{Symbolics.Num}()
-        for i in idxs, v in cvars[i]
-            v in varset || (push!(varset, v); push!(vars, v))
-        end
-        push!(result, (constraints=cs[idxs], variables=vars, keys=ks[idxs]))
-    end
-    sort!(result, by=g -> first(g.keys))
-    return result
-end
-
 function _count_nodes(node)
     count = 1
 
@@ -184,6 +132,16 @@ function _count_nodes(node)
 end
 
 robust_node_count(expr) = _count_nodes(Symbolics.unwrap(expr))
+
+# basic predicate functions
+notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
+is_number(x) = x isa Number
+is_real(x) = x isa Real
+is_complex(x) = x isa Number && !(x isa Real)
+is_integer(x) = x isa Integer
+is_domain(x) = x isa SymDomain
+is_rational(x) = x isa Rational
+is_even(x) = x isa Integer && (x%2==0)
 
 # ---------------------------------------------------------------------------
 # 1. Relation utils
@@ -318,7 +276,7 @@ clear_cache!() = empty!(cache)
 resize_cache!(n::Integer) = (cache_size[]=n; resize!(cache; maxsize=n))
 
 # Anything derived with paving depends on these global settings.
-_env() = (ROI[], tolerance[])
+_env() = (tolerance[])
 
 # Key constructors. Every block / context key in the file is built here only.
 # Constraint key: content hash of residual + relation (no Ids, no printing).
@@ -326,11 +284,12 @@ _ckey(c::Constraint) = hash(Symbolics.unwrap(c.relation.residual), hash(c.relati
 # Block key: hash of its constraint keys, which must already be in canonical order.
 _comp_key(constraint_keys) = hash(Tuple(constraint_keys))
 # Parameter key: the keys of its constraints (constraints are kept sorted by key).
-_pkey(constraints) = Tuple(c.key for c in constraints)
+_pkey(constraints::Vector{Constraint}) = Tuple(c.key for c in constraints)
 # Context key: the keys of its blocks (blocks are kept sorted by key).
-_ctx_key(comps, params) = Tuple((c.key for c in comps)..., _pkey(params))
+_ctx_key(comps::Vector{Comp}, params::Vector{Constraint}) = ((c.key for c in comps)..., _pkey(params))
 # A context made of exactly one block.
-_ctx_key(comp::Comp) = (comp.key,)
+_ctx_key(comp::Comp, params=Constraint[]) = (comp.key, _pkey(params))
+_ctx_key(comps::Vector{Comp}) = _ctx_key(comps, Constraint[])
 
 
 const _EMPTY_CTX = Ctx(Comp[], Constraint[], ())

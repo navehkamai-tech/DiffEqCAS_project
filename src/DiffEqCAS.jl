@@ -11,7 +11,6 @@ using LinearAlgebra
 using DomainSets
 using ModelingToolkit
 using DynamicQuantities
-using IntervalArithmetic
 using IntervalBoxes
 using LRUCache
 using DataStructures
@@ -19,11 +18,13 @@ using TermInterface
 using Base.MathConstants
 using StaticArrays
 using Base.Threads
+using IntervalArithmetic
 
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute, get_variables
 import SymbolicUtils as SU
 import SymbolicUtils: maketerm, @rule, @acrule
 import Base.MathConstants as MC
+import IntervalArithmetic: Interval, BareInterval, interval, intersect_interval, isempty_interval, emptyinterval, entireinterval, bareinterval, isentire_interval, isempty_interval, inf, sup, pow
 # ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
