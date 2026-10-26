@@ -1,5 +1,14 @@
 # paving specific utils
 _box_contains(x, box) = all(k -> in_interval(x[k], _bi(box[k])), eachindex(x))
+# True iff every coordinate is a nonempty degenerate interval [a, a].
+function _is_point(box)
+    for k in 1:length(box)
+        iv = _bi(box[k])
+        (isempty_interval(iv) || inf(iv) != sup(iv)) && return false
+    end
+    return true
+end
+
 const _MAX_MASKED = 64               # constraints tracked by the UInt64 mask
 # ===========================================================================
 # Flat Tape-Compiled HC4Revise Engine
@@ -43,6 +52,31 @@ struct _TapeInstruction
 end
 
 """
+    MVFPlan
+ 
+Per-tape mean-value state. `multi` is static. `vars`/`dtapes` (parallel; the
+variables the form is applied to, cheapest derivative first) are filled lazily by
+`_mvf_build!`. `state`: 0 not built, 1 ready, -1 unusable. `fails`/`skip` drive
+the back-off; `tries`/`hits` are diagnostics (see `_mvf_report`).
+The counters are plain fields: sharing one prepared system across threads can
+make them inexact, which only affects the heuristic, never soundness.
+"""
+mutable struct MVFPlan <: _AbstractMVFPlan
+    residual::Symbolics.Num
+    variables::Vector
+    multi::Vector{Int}
+    lock::ReentrantLock
+    state::Threads.Atomic{Int}
+    vars::Vector{Int}
+    dtapes::Vector{CompiledHC4}
+    need_len::Int
+    fails::Int
+    skip::Int
+    tries::Int
+    hits::Int
+end
+
+"""
     CompiledHC4
 
 A flat, zero-allocation Wengert tape representation of a `SymRelation` for a fixed variable ordering.
@@ -59,6 +93,7 @@ struct CompiledHC4
     confine::_BI
     rel::Symbol
     tape_len::Int
+    mvf::Union{Nothing,MVFPlan}
 end
 
 struct _Prepared
@@ -71,6 +106,16 @@ const _NO_TAPES = _Prepared(CompiledHC4[], false, 0)
 
 _workspaces(p::_Prepared) = (Vector{_BI}(undef, p.max_len), Vector{_DI}(undef, p.max_len))
 Vector{_DI}
+
+
+const MVF_MAX_COST_RATIO = 6.0   # total derivative tape length / tape length
+const MVF_ABORT_RATIO = 1.0      # abort when width(Σ terms) >= ratio * width(F_nat)
+const MVF_MIN_GAIN = 0.05        # fraction of the relevant width that counts as a gain
+const MVF_MAX_BACKOFF_EXP = 6    # skip at most 2^6 - 1 = 63 calls after repeated failures
+
+MVFPlan(residual, variables, multi) =
+    MVFPlan(residual, collect(variables), multi, ReentrantLock(), Threads.Atomic{Int}(0),
+        Int[], CompiledHC4[], 0, 0, 0, 0, 0)
 
 function _give_confine(rel)
     if rel === _LT || rel === _LE
@@ -123,11 +168,31 @@ function _const_interval(v::Real)
 end
 
 """
-    compile_hc4(relation::SymRelation, variables) -> CompiledHC4
-
+    compile_hc4(relation::SymRelation, variables; mvf=false) -> CompiledHC4
+ 
 Compile a symbolic relation into a flat `CompiledHC4` tape once before paving.
+ 
+With `mvf=true` the tape additionally gets a mean-value plan (`MVFPlan`) when the
+expression could profit from one: it must be differentiable (no `abs`/`sign`) and
+some variable must occur more than once (dependency problem). Otherwise `tape.mvf`
+is `nothing`. Derivative tapes themselves are compiled lazily, on first use.
 """
-function compile_hc4(relation::SymRelation, variables)
+function compile_hc4(relation::SymRelation, variables; mvf::Bool=false)
+    base = _compile_hc4_residual(relation.residual, relation.relation, variables)
+    mvf || return base
+    plan = _build_mvf_plan(base, relation, variables)
+    return plan === nothing ? base : _with_mvf(base, plan)
+end
+
+# Same tape, with a mean-value plan attached.
+_with_mvf(t::CompiledHC4, plan::_AbstractMVFPlan) =
+    CompiledHC4(t.num_vars, t.constants, t.instructions, t.nary_args, t.root_idx,
+        t.confine, t.rel, t.tape_len, plan)
+
+
+# Internal compiler for raw residuals, especially symbolic derivatives that must
+# not be rescaled or negated by SymRelation canonicalization.
+function _compile_hc4_residual(root_residual, rel::Symbol, variables)
     num_vars = length(variables)
     unwrapped_vars = [Symbolics.unwrap(v) for v in variables]
 
@@ -162,7 +227,7 @@ function compile_hc4(relation::SymRelation, variables)
         node_to_idx[expr] = -length(call_nodes)
     end
 
-    root_expr = Symbolics.unwrap(relation.residual)
+    root_expr = Symbolics.unwrap(root_residual)
     _collect_postorder!(root_expr)
 
     num_consts = length(constants)
@@ -208,8 +273,7 @@ function compile_hc4(relation::SymRelation, variables)
     end
 
     root_idx = node_to_idx[root_expr]
-    rel = relation.relation
-    confine = _give_confine(relation.relation)
+    confine = _give_confine(rel)
     tape_len = num_vars + num_consts + length(call_nodes)
 
     return CompiledHC4(num_vars, constants, instructions, nary_args, root_idx, confine, rel, tape_len)
@@ -241,6 +305,220 @@ function _prepare(constraints, variables)::_Prepared
     max_len = maximum((t.tape_len for t in tapes); init=N)
     return _Prepared(tapes, dropped, max_len)
 end
+
+#---------------------------------------------------------------------------------
+# Mean Valued Forms
+#---------------------------------------------------------------------------------
+
+# Call `f(idx)` for every operand index of `inst`. (`arg2` is an exponent, not an
+# index, for OP_POW_INT, and unused for other unary ops.)
+@inline function _foreach_operand(f::F, tape::CompiledHC4, inst::_TapeInstruction) where {F}
+    op = inst.op
+    if op == OP_ADD || op == OP_MUL
+        for k in inst.arg1:inst.arg2
+            f(tape.nary_args[k])
+        end
+    elseif op == OP_SUB || op == OP_DIV || op == OP_POW
+        f(inst.arg1)
+        f(inst.arg2)
+    else
+        f(inst.arg1)
+    end
+    return nothing
+end
+
+# Gate 1. `abs`/`sign` are not differentiable everywhere, so the theorem fails.
+function _mvf_differentiable(tape::CompiledHC4)
+    for inst in tape.instructions
+        (inst.op == OP_ABS || inst.op == OP_SIGN) && return false
+    end
+    return true
+end
+
+# Gate 2. Indices of variables with >= 2 occurrences, counted over root-to-leaf
+# paths of the DAG (saturating at 2). Instructions are in post-order, so one reverse
+# sweep propagates path counts from the root to the leaves.
+function _mvf_multi_occurrence(tape::CompiledHC4)::Vector{Int}
+    paths = zeros(Int, tape.tape_len)
+    paths[tape.root_idx] = 1
+    for n in length(tape.instructions):-1:1
+        inst = tape.instructions[n]
+        p = paths[inst.out_idx]
+        p == 0 && continue
+        _foreach_operand(tape, inst) do a
+            paths[a] = min(paths[a] + p, 2)
+        end
+    end
+    return Int[i for i in 1:tape.num_vars if paths[i] >= 2]
+end
+
+function _build_mvf_plan(tape::CompiledHC4, relation::SymRelation, variables)
+    _mvf_differentiable(tape) || return nothing
+    multi = _mvf_multi_occurrence(tape)
+    isempty(multi) && return nothing
+    return MVFPlan(relation.residual, variables, multi)
+end
+
+# Symbolic ∂residual/∂variable compiled to a tape; `nothing` if it cannot be.
+function _compile_partial(residual, variable, variables)
+    try
+        derivative = Symbolics.derivative(residual, variable; simplify=true)
+        return _compile_hc4_residual(derivative, _EQ, variables)
+    catch err
+        (err isa InterruptException || err isa OutOfMemoryError) && rethrow()
+        return nothing
+    end
+end
+
+function _is_zero_tape(t::CompiledHC4)
+    isempty(t.instructions) && t.root_idx > t.num_vars || return false
+    c = t.constants[t.root_idx-t.num_vars]
+    return inf(c) == 0.0 && sup(c) == 0.0
+end
+
+# Gates 3-4. Compile the derivatives (once) and pick the variables within budget.
+# Returns the new state.
+function _mvf_build!(plan::MVFPlan, tape::CompiledHC4)::Int
+    return lock(plan.lock) do
+        s = plan.state[]
+        s != 0 && return s
+        cand = Tuple{Int,CompiledHC4}[]
+        for i in plan.multi
+            dt = _compile_partial(plan.residual, plan.variables[i], plan.variables)
+            (dt === nothing || _is_zero_tape(dt)) && continue
+            push!(cand, (i, dt))
+        end
+        sort!(cand; by=c -> c[2].tape_len)
+        budget = MVF_MAX_COST_RATIO * tape.tape_len
+        spent = 0
+        vars = Int[]
+        dtapes = CompiledHC4[]
+        need = tape.tape_len
+        for (i, dt) in cand
+            spent + dt.tape_len > budget && break
+            spent += dt.tape_len
+            push!(vars, i)
+            push!(dtapes, dt)
+            need = max(need, dt.tape_len)
+        end
+        plan.vars = vars
+        plan.dtapes = dtapes
+        plan.need_len = need
+        plan.state[] = isempty(vars) ? -1 : 1     # published last
+        return plan.state[]
+    end
+end
+
+@inline _mvf_active(x::_BI) = (d=diam(x); 0.0 < d < Inf)
+
+function _mvf_fail!(plan::MVFPlan)
+    plan.fails += 1
+    plan.skip = (1 << min(plan.fails, MVF_MAX_BACKOFF_EXP)) - 1
+    return nothing
+end
+
+"""
+    _mvf_refine!(tape, plan, ws, dws, F_nat) -> Union{Nothing,_BI}
+ 
+Called by `HC4Revise` after the bare forward pass, when the status is `:unknown`.
+`ws[1:N]` holds the box. Returns an enclosure of f(box) contained in `F_nat`, or
+`nothing` when the form was not applicable or not worth finishing (the caller
+then proceeds with `F_nat`). Only `dws` is used as scratch; `ws` is never touched,
+so the reverse pass is unaffected. The returned interval, when `:inside`, is backed by
+a decorated whole-box check, so the caller may return `:inside` without a second
+definedness pass.
+"""
+function _mvf_refine!(tape::CompiledHC4, plan::MVFPlan, ws::Vector{_BI}, dws::Vector{_DI},
+    F_nat::_BI)::Union{Nothing,_BI}
+
+    plan.state[] < 0 && return nothing
+
+    # (6) free gates
+    w_nat = diam(F_nat)
+    w_nat > 0.0 || return nothing
+    any_active = false
+    @inbounds for k in plan.multi
+        if _mvf_active(ws[k])
+            any_active = true
+            break
+        end
+    end
+    any_active || return nothing
+
+    # (7) back-off throttles only work that would otherwise be paid for
+    if plan.skip > 0
+        plan.skip -= 1
+        return nothing
+    end
+
+    # (4) lazy compile
+    plan.state[] == 0 && _mvf_build!(plan, tape)
+    plan.state[] < 0 && return nothing
+    length(dws) < plan.need_len && resize!(dws, plan.need_len)
+    plan.tries += 1
+    N = tape.num_vars
+    vars = plan.vars
+
+    # (8) f defined and continuous on the whole box
+    @inbounds for i in 1:N
+        dws[i] = interval(ws[i])
+    end
+    decoration(_execute_forward!(tape, dws)) >= dac || return _mvf_fail!(plan)
+
+    # base = f(X_R, c_S): S-variables with a usable term go to their midpoint
+    nact = 0
+    @inbounds for k in vars
+        if _mvf_active(ws[k])
+            dws[k] = interval(_bi(mid(ws[k])))
+            nact += 1
+        end
+    end
+    nact == 0 && return nothing
+    base = bareinterval(_execute_forward!(tape, dws))
+    isempty_interval(base) && return _mvf_fail!(plan)
+
+    # Σ D_k (X_k - c_k), Hansen order: dws[k] widens to X_k just before D_k is
+    # evaluated, so earlier variables are at X and later ones still at c.
+    acc = _bi(0.0, 0.0)
+    @inbounds for j in eachindex(vars)
+        k = vars[j]
+        Xk = ws[k]
+        _mvf_active(Xk) || continue
+        dws[k] = interval(Xk)
+        D = _execute_forward!(plan.dtapes[j], dws)
+        decoration(D) >= dac || return _mvf_fail!(plan)           # (9)
+        acc = acc + bareinterval(D) * (Xk - _bi(mid(Xk)))
+        diam(acc) >= MVF_ABORT_RATIO * w_nat && return _mvf_fail!(plan)  # (10)
+    end
+
+    F = intersect_interval(F_nat, base + acc)
+    isempty_interval(F) && return _mvf_fail!(plan)   # impossible for sound enclosures
+
+    # success bookkeeping, measured on what the reverse pass actually sees
+    decided = _eval_relation_status(tape.rel, F) !== :unknown
+    gained = decided || _significant_reduction(
+        intersect_interval(F_nat, tape.confine), intersect_interval(F, tape.confine), MVF_MIN_GAIN)
+    if gained
+        plan.hits += 1
+        plan.fails = 0
+    else
+        plan.fails += 1
+        plan.skip = (1 << min(plan.fails, MVF_MAX_BACKOFF_EXP)) - 1
+    end
+    return F      # sound and no wider than F_nat, so usable even without a "gain"
+end
+
+"""
+    _mvf_report(prep::_Prepared) -> Vector{NamedTuple}
+ 
+Per-constraint diagnostics: whether it has a plan, how many times it was fully
+evaluated (`tries`), how often it paid off (`hits`), and the variables used.
+"""
+_mvf_report(prep::_Prepared) = [
+    tape.mvf === nothing ? (plan=false, tries=0, hits=0, vars=Int[]) :
+    (plan=true, tries=(tape.mvf::MVFPlan).tries, hits=(tape.mvf::MVFPlan).hits,
+        vars=copy((tape.mvf::MVFPlan).vars))
+    for tape in prep.tapes]
 
 # ---------------------------------------------------------------------------
 # Elemental Reverse Contractors & Helpers
@@ -662,6 +940,10 @@ Returns `(:inside | :outside | :unknown, box)`. `:inside` is only returned when
 the decorated check confirms the constraint is defined and satisfied on the
 entire box. If the bare enclosure says inside but definedness cannot be
 confirmed, the call falls through to the reverse pass and returns `:unknown`.
+ 
+If the natural enclosure is inconclusive and `tape.mvf` is set, the root is first
+intersected with a mean-value enclosure (see `_mvf_refine!`), which can decide the
+constraint or tighten what the reverse pass starts from.
 """
 function HC4Revise(box::IntervalBox{N,T}, tape::CompiledHC4,
     workspace::Vector{_BI}, dws::Vector{_DI}) where {N,T}
@@ -669,10 +951,24 @@ function HC4Revise(box::IntervalBox{N,T}, tape::CompiledHC4,
         workspace[i] = _bi(box[i])
     end
 
-    status = _eval_relation_status(tape.rel, _execute_forward!(tape, workspace))
+    F_nat = _execute_forward!(tape, workspace)
+    status = _eval_relation_status(tape.rel, F_nat)
     status === :outside && return :outside, box
     if status === :inside && _inside_and_defined(tape, box, dws)
         return :inside, box
+    end
+
+    # Mean-value refinement of the root. Only when the natural enclosure could not
+    # decide, and only for tapes that passed the static dependency/differentiability
+    # gates. `workspace` is untouched by `_mvf_refine!` except for the root below.
+    if status === :unknown && tape.mvf !== nothing
+        F = _mvf_refine!(tape, tape.mvf::MVFPlan, workspace, dws, F_nat)
+        if F !== nothing
+            mstatus = _eval_relation_status(tape.rel, F)
+            mstatus === :outside && return :outside, box
+            mstatus === :inside && return :inside, box   # f is dac on the box (checked in _mvf_refine!)
+            workspace[tape.root_idx] = F
+        end
     end
 
     _execute_reverse!(tape, workspace) || return :outside, box
@@ -760,6 +1056,21 @@ function _hc4_propagate(box::IntervalBox{N,T}, tapes::Vector{CompiledHC4}, activ
             current = next
         end
         (significant && mask != 0) || break
+    end
+
+    if mask != 0 && _is_point(current)
+        for i in eachindex(tapes)
+            bit = UInt64(1) << (i - 1)
+            (mask & bit) == 0 && continue
+            status, next = HC4Revise(current, tapes[i], ws, dws)
+            status === :outside && return :unsat, next, mask
+            if status === :inside
+                mask &= ~bit
+                continue
+            end
+            _box_empty(next) && return :unsat, next, mask
+            current = next
+        end
     end
     return :unknown, current, mask
 end
@@ -914,6 +1225,7 @@ end
 # Callable hook accepted by _pave_core. Bit zero is the equality probe; every
 # other active constraint must already be inside-and-defined on the whole box.
 function (cert::_ZeroCertificate)(box, mask::UInt64, _ws::Vector{_BI}, _dws::Vector{_DI})::Bool
+    mask == 0 && return true
     (mask & ~UInt64(1)) == 0 || return false
     boxivs = _BI[_bi(box[i]) for i in 1:length(box)]
 
@@ -977,7 +1289,13 @@ function _pave_core(root::IntervalBox{N,T}, prep::_Prepared, ws::Vector{_BI}, dw
         b1, b2 = bisect(current)
         for b in (b1, b2)
             status, child, child_mask = _hc4_propagate(b, prep.tapes, mask, ws, dws; ratio=ratio)
-            status === :unsat || push!(working, (child, child_mask))
+            status === :unsat && continue
+
+            if child_mask != 0 && _is_point(child)
+                unresolved = true
+                continue
+            end
+            push!(working, (child, child_mask))
         end
     end
     return unresolved ? :unknown : :unsat
@@ -998,6 +1316,7 @@ function _pave_contracted(c::_Contracted; epsilon::Float64=tolerance[],
     c.mask == 0 && return :unknown              # all inside, but constraints were dropped
     box = _make_box(c.box)
     _bounded(box) || return :unknown
+    _is_point(box) && return :unknown
     ws, dws = _workspaces(c.prep)
     return _pave_core(box, c.prep, ws, dws, c.mask, epsilon, ratio;
         certify=certify, max_boxes=max_boxes)

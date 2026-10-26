@@ -22,10 +22,47 @@ _multiplicative_factors(expr) = collect(Symbolics.factors(unwrap(expr)))
 
 _as_num(v) = v isa Symbolics.Num ? v : Symbolics.wrap(v)
 
+_inv(c) = c isa Integer ? 1//c : inv(c)
+
+# D of a variable, of x(t), or of nested D of those, behaves like a leaf.
+function _is_atomic(a)
+    SU.iscall(a) || return true
+    op = SU.operation(a)
+    op isa SU.Symbolic && return true     # unknown function x(t)
+    op isa SU.Differential &&
+        return _is_atomic(SU.arguments(a)[1])
+    return false
+end
+
+function _is_transparent_diff(expr)
+    op = SU.operation(expr)
+    return op isa SU.Differential &&
+        _is_atomic(SU.arguments(expr)[1])
+end
+
+_is_leafish(a) = _is_atomic(_strip_getindex(a))
+
+# x(t)[1] -> x(t)
+function _strip_getindex(v)
+    while SU.iscall(v) && SU.operation(v) === getindex
+        v = SU.arguments(v)[1]
+    end
+    return v
+end
+
+# Kind of a single variable returned by get_variables.
+function _var_kind(v)
+    v = _strip_getindex(v)
+    MTK.isparameter(v) && return :p   # check first: p(t) is a call too
+    MTK.isconstant(v) && return :c
+    SU.iscall(v) && return :d   # x(t), D(x(t)), ...
+    return :i                                     # bare non-parameter symbol, e.g. t
+end
+
 function _vars_of(expr)::Vector{Symbolics.Num}
     u = Symbolics.unwrap(expr)
     u isa Number && return Symbolics.Num[]
-    return unique(Symbolics.Num[_as_num(v) for v in Symbolics.get_variables(u)])
+    return Symbolics.Num[_as_num(v) for v in Symbolics.get_variables(u)]
 end
 
 function _push_unique!(arr, new_vals)
@@ -48,7 +85,24 @@ function D(vars...)
     return expr -> foldr((v, ex) -> Differential(v)(ex), sorted_vars, init=expr)
 end
 
+function _has_derivative(expr)
+    SU.iscall(expr) || return false
+    SU.operation(expr) isa SU.Differential && return true
+    return any(_has_derivative, SU.arguments(expr))
+end
+
+# Does the expression contain a dependent variable, including inside derivatives?
+function _has_depvar(expr)
+    SU.iscall(expr) || return false          # bare leaf: independent/parameter/constant
+    op = SU.operation(expr)
+    args = SU.arguments(expr)
+    op isa SU.Differential && return _has_depvar(args[1])
+    op isa SU.Symbolic && return _var_kind(expr) === :d   # x(t) vs p(t)
+    return any(_has_depvar, args)
+end
+
 # Does `expr` mention a dependent variable or a derivative?
+# I'll keep this since walking the tree once is more efficient than doing _has_derivative||_has_depvar
 function _has_depvar_or_diff(expr, sys::DESys)
     dvs = [Symbolics.unwrap(d) for d in sys.dvs]
     walk(e) = any(d -> isequal(d, e), dvs) ||
@@ -76,12 +130,47 @@ function chain_rule(J_inv, old_var_idx, new_vars, arg, order=1)
     return unwrap(term)
 end
 
-function _const_value(expr)
-    v = SU.unwrap_const(Symbolics.unwrap(expr))
-    return v isa Real ? v : nothing
+function _const_value(leaf)
+    u = Symbolics.unwrap(leaf)
+    v = SU.unwrap_const(u)
+    v isa Real && return v
+    if MTK.isconstant(u) && MTK.hasdefault(u)
+        d = SU.unwrap_const(Symbolics.unwrap(MTK.getdefault(u)))
+        return d isa Real ? d : nothing
+    end
+    return nothing
 end
 
-#parameter helper
+function _classify_residual(expanded, rel::Symbol)::Symbol
+    vars = _vars_of(expanded)
+    kinds = Set(_var_kind(Symbolics.unwrap(v)) for v in vars)
+    :d in kinds && return :d
+    :i in kinds && return :i
+    :p in kinds && return :p
+
+    # Only numbers and @constants remain: substitute defaults, leaving a leaf.
+    vals = Dict(Symbolics.unwrap(v) => _const_value(v) for v in vars)
+    any(isnothing, values(vals)) && throw(ArgumentError(
+        "constant without a real default value in $expanded"))
+    val = _const_value(Symbolics.simplify(
+        Symbolics.substitute(Symbolics.unwrap(expanded), vals)))
+    val === nothing && throw(ArgumentError(
+        "cannot evaluate constant residual $expanded to a real number"))
+    return _holds(rel, val) ? :t : :f
+end
+
+function _canonicalize(res::Symbolics.Num, rel::Symbol)
+    ts = _additive_terms(res)
+    i = findfirst(t -> !isempty(_vars_of(t)), ts)   # first term that has a variable
+    i === nothing && return res, rel
+    c = _numeric_factor(ts[i])
+    isone(c) && return res, rel
+    s = _inv(c)
+    scaled = Symbolics.simplify(_as_num(sum(t * s for t in ts)))
+    return scaled, (c < 0 ? _flip_relation(rel) : rel)
+end
+
+#TODO: deprecate and replace call sites with checks using `MTK.isparameter``
 function extract_parameters(list::Tuple)
     symbols = Symbolics.Num[]
     for i in list
@@ -99,9 +188,9 @@ function extract_parameters(list::Tuple)
     # Keep only unique variables found in the expressions
     unique_vars = unique(symbols)
 
-    # Filter using ModelingToolkit's native parameter metadata check
+    # Filter using MTK's native parameter metadata check
     params = filter(unique_vars) do v
-        ModelingToolkit.isparameter(unwrap(v))
+        MTK.isparameter(unwrap(v))
     end
 
     # Return as Vector{Symbolics.Num} to maintain compatibility with your other functions
@@ -134,7 +223,7 @@ end
 robust_node_count(expr) = _count_nodes(Symbolics.unwrap(expr))
 
 # basic predicate functions
-notavariable(x) = ModelingToolkit.isparameter(x) || ModelingToolkit.isconstant(x) || x isa Number
+notavariable(x) = MTK.isparameter(x) || MTK.isconstant(x) || x isa Number
 is_number(x) = x isa Number
 is_real(x) = x isa Real
 is_complex(x) = x isa Number && !(x isa Real)
@@ -244,11 +333,75 @@ function _numeric_factor(term)
     return 1
 end
 
+"""
+    _connected_groups(constraints; key=_ckey)
+
+Split constraints into connected groups: two constraints are in the same group
+when they share a variable, directly or through other constraints. Constraints
+with no variables each form their own group.
+
+Duplicates (same `key`) are dropped. Within a group, constraints are ordered by
+their key, and the groups themselves are ordered by their smallest key, so the
+result is deterministic and independent of the input order.
+
+Returns a vector of `(constraints, variables, keys)` named tuples, where
+`variables` is the group's unique variables in order of first appearance and
+`keys` are the constraint keys in the same order as `constraints`.
+"""
+function _connected_groups(constraints; key=_ckey)
+    seen = Set{UInt64}()
+    cs = Constraint[]
+    ks = UInt64[]
+    for c in constraints
+        k = key(c)
+        k in seen && continue
+        push!(seen, k)
+        push!(cs, c)
+        push!(ks, k)
+    end
+
+    n = length(cs)
+    parent = collect(1:n)
+    function find(i)
+        while parent[i] != i
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        end
+        return i
+    end
+
+    cvars = [_vars_of(c.relation.residual) for c in cs]
+    owner = Dict{Symbolics.Num,Int}()
+    for i in 1:n, v in cvars[i]
+        j = get!(owner, v, i)
+        j == i || (parent[find(i)] = find(j))
+    end
+
+    groups = Dict{Int,Vector{Int}}()
+    for i in 1:n
+        push!(get!(groups, find(i), Int[]), i)
+    end
+
+    result = NamedTuple{(:constraints, :variables, :keys),
+        Tuple{Vector{Constraint},Vector{Symbolics.Num},Vector{UInt64}}}[]
+    for idxs in values(groups)
+        sort!(idxs, by=i -> ks[i])
+        vars = Symbolics.Num[]
+        varset = Set{Symbolics.Num}()
+        for i in idxs, v in cvars[i]
+            v in varset || (push!(varset, v); push!(vars, v))
+        end
+        push!(result, (constraints=cs[idxs], variables=vars, keys=ks[idxs]))
+    end
+    sort!(result, by=g -> first(g.keys))
+    return result
+end
+
 # units
 
 function get_units_vector(var, basis::AbstractVector{Symbol}=SI_BASIS)
     # 1. Extract the unit and underlying dimensions
-    u = ModelingToolkit.get_unit(var)
+    u = MTK.get_unit(var)
     d = dimension(u)
     dims = typeof(d).parameters[1]
 
@@ -267,7 +420,6 @@ function get_units_vector(var, basis::AbstractVector{Symbol}=SI_BASIS)
     return [powers[b] for b in basis]
 end
 
-
 #------------------------------------------
 # Paving & cache
 #------------------------------------------
@@ -276,7 +428,7 @@ clear_cache!() = empty!(cache)
 resize_cache!(n::Integer) = (cache_size[]=n; resize!(cache; maxsize=n))
 
 # Anything derived with paving depends on these global settings.
-_env() = (tolerance[])
+_env() = (tolerance[], mvf_enabled[])
 
 # Key constructors. Every block / context key in the file is built here only.
 # Constraint key: content hash of residual + relation (no Ids, no printing).
@@ -290,6 +442,10 @@ _ctx_key(comps::Vector{Comp}, params::Vector{Constraint}) = ((c.key for c in com
 # A context made of exactly one block.
 _ctx_key(comp::Comp, params=Constraint[]) = (comp.key, _pkey(params))
 _ctx_key(comps::Vector{Comp}) = _ctx_key(comps, Constraint[])
+# keys used in satisfiability.jl
+_ekey(u, ckey::Tuple) = (:evidence, u, ckey, _env())
+_fkey(comp::Comp) = (:comp, comp.key, _env())
+_hkey(comp::Comp) = (:hc4, comp.key, _env())
 
 
 const _EMPTY_CTX = Ctx(Comp[], Constraint[], ())
