@@ -4,9 +4,6 @@
 
 _answer(i::Evidence, w::Symbol) = w === :neg ? i.neg : w === :zero ? i.zero : i.pos
 _decided(i::Evidence, want) = all(w -> _answer(i, w) !== Unknown, want)
-_ekey(u, ckey::Tuple) = (:evidence, u, ckey, _env())
-_fkey(comp::Comp) = (:comp, comp.key, _env())
-_hkey(comp::Comp) = (:hc4, comp.key, _env())
 
 _to_answer(s::Symbol)::Answer = s === :sat ? Yes : s === :unsat ? No : Unknown
 

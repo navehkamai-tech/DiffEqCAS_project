@@ -9,7 +9,7 @@ module DiffEqCAS
 using Symbolics
 using LinearAlgebra
 using DomainSets
-using ModelingToolkit
+import ModelingToolkit as MTK
 using DynamicQuantities
 using IntervalBoxes
 using LRUCache

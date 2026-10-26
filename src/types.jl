@@ -16,6 +16,32 @@ const _GLOBAL_ID_COUNTER = Threads.Atomic{Int}(0)
 fresh_id() = Threads.atomic_add!(_GLOBAL_ID_COUNTER, 1) + 1
 
 # ===========================================================================
+# 1b. Expansion Limits
+# ===========================================================================
+"""
+    ExpansionLimits(; max_passes, max_nodes, max_derivative_nodes)
+ 
+Safety limits for bounded algebraic expansion (see `bounded_expand` in
+algebra.jl). Expansion can blow up expression size, so every entry point that
+expands takes one of these. Sizes are DAG node counts.
+ 
+- `max_passes`: per-region simplify/expand rounds before giving up on a fixpoint.
+- `max_nodes`: total growth allowance across all regions of one expansion run.
+- `max_derivative_nodes`: a derivative expansion whose result reaches this size is rejected.
+"""
+Base.@kwdef struct ExpansionLimits
+    max_passes::Int = 4
+    max_nodes::Int = 100_000
+    max_derivative_nodes::Int = 50_000
+    function ExpansionLimits(mp, mn, mdn)
+        mp >= 1 || throw(ArgumentError("max_passes must be >= 1"))
+        mn >= 1 || throw(ArgumentError("max_nodes must be >= 1"))
+        mdn >= 0 || throw(ArgumentError("max_derivative_nodes must be >= 0"))
+        return new(mp, mn, mdn)
+    end
+end
+
+# ===========================================================================
 # 2. Symbolic Relations & Equations
 # ===========================================================================
 const _LT = Symbol("<")
@@ -35,49 +61,28 @@ A relation between a symbolic residual and zero.
 struct SymRelation
     residual::Symbolics.Num
     relation::Symbol
+    type::Symbol # :d = dependent, :i = independent, :p = parametric, :t = trivial, :f = false
+    key::UInt64 #hashed key of expanded normal form of residual and relation
 
-    global _unchecked_relation(residual, relation) = new(residual, _relation_symbol(relation))
-end
-
-function _canonicalize_relation(residual, rel_sym::Symbol)
-    expr = Symbolics.unwrap(simplify(expand(wrap(residual))))
-    val = SU.unwrap_const(expr)
-    val isa Real && return (wrap(sign(val)), rel_sym)
-
-    vars = Symbolics.get_variables(expr)
-    isempty(vars) && return (wrap(expr), rel_sym)
-
-    # Prefer true independent variables over parameters/constants, sorted alphabetically
-    ivs = filter(v -> !ModelingToolkit.isparameter(Symbolics.unwrap(v)) &&
-        !ModelingToolkit.isconstant(Symbolics.unwrap(v)), vars)
-    target_vars = isempty(ivs) ? vars : ivs
-    sort!(target_vars, by=string)
-    lead_var = Symbolics.unwrap(first(target_vars))
-
-    # Extract coefficient of highest power of `lead_var`
-    deg = Symbolics.degree(expr, lead_var)
-    lead_term = deg > 0 ? Symbolics.coeff(expr, deg == 1 ? lead_var : lead_var^deg) : expr
-    c = _numeric_factor(lead_term)
-
-    if c isa Real && !iszero(c)
-        # Normalize magnitude and force leading numeric coefficient to be positive
-        expr = simplify(expand(wrap(expr) / abs(c)))
-        if c < 0
-            expr = simplify(expand(-expr))
-            rel_sym = _flip_relation(rel_sym)
-        end
-    else
-        expr = wrap(expr)
+    # Raw constructor: trusts its inputs. Use the 2-arg outer constructor normally.
+    function SymRelation(residual::Symbolics.Num, relation::Symbol, type::Symbol, key::UInt64)
+        type in (:d, :i, :p, :t, :f) || throw(ArgumentError("invalid relation type: $type"))
+        return new(residual, relation, type, key)
     end
-    return (expr, rel_sym)
 end
 
-function SymRelation(residual, relation)
-    res, rel_sym = _canonicalize_relation(residual, _relation_symbol(relation))
-    return _unchecked_relation(res, rel_sym)
+function SymRelation(residual, relation; limits=ExpansionLimits())
+    rel = _relation_symbol(relation)
+    res = _as_num(normalize_expr(_as_num(residual)))
+    res = _as_num(_expand_residual(res, limits))
+    res = Symbolics.simplify(res)
+    type = _classify_residual(res, rel)
+    type in (:d, :i, :p) && ((res, rel) = _canonicalize(res, rel))
+    key = hash(Symbolics.unwrap(res), hash(rel))
+    return SymRelation(res, rel, type, key)
 end
 
-# `x > 1`  ->  SymRelation(x - 1, :>)
+# `x > 1`  ->  SymRelation(x - 1, _GT)
 function SymRelation(expr::Symbolics.Num)
     unwrapped = Symbolics.unwrap(expr)
     SU.iscall(unwrapped) ||
@@ -260,27 +265,20 @@ end
 
 """
 Configuration for the system simplifier.
-The pass limit is deliberately explicit. Simplification can increase expression
-size, so the number of fixed-point passes is bounded.
+Expansion safety limits live in `expansion` (an `ExpansionLimits`, shared with
+algebra.jl); the fields here are the simplifier's own pipeline controls.
 """
 Base.@kwdef struct SimplificationOptions
-    # Iteration caps
-    max_stabilizer_passes::Int = 4      # per-region rounds in _improve
     max_rounds::Int = 4                 # outer fixpoint over phases
-    # Size limits (DAG nodes, matching the region storage)
-    max_nodes::Int = 100_000            # total headroom for the algebraic pass
-    max_derivative_nodes::Int = 50_000  # reject a derivative expansion above this
+    expansion::ExpansionLimits = ExpansionLimits()
     # Feature switches (only things that currently have code behind them)
     expand_derivatives::Bool = true
-    expand_products::Bool = true        # gates `expand` in _improve only
+    expand_products::Bool = true        # gates the algebraic pass
     # Symbolic rules for _nonalgebraic_pass, composed by the caller
     rules::Vector{Any} = Any[]
-    function SimplificationOptions(msp, mr, mn, mdn, ed, ep, rules)
-        msp >= 1 || throw(ArgumentError("max_stabilizer_passes must be >= 1"))
+    function SimplificationOptions(mr, expansion, ed, ep, rules)
         mr >= 1 || throw(ArgumentError("max_rounds must be >= 1"))
-        mn >= 1 || throw(ArgumentError("max_nodes must be >= 1"))
-        mdn >= 0 || throw(ArgumentError("max_derivative_nodes must be >= 0"))
-        return new(msp, mr, mn, mdn, ed, ep, rules)
+        return new(mr, expansion, ed, ep, rules)
     end
 end
 
@@ -433,7 +431,16 @@ const _BI = BareInterval{Float64}
 @inline _empty_bi() = emptyinterval(_BI)
 @inline _entire_bi() = entireinterval(_BI)
 
-const _DI = Interval{Float64}        # decorated interval
+const _DI = Interval{Float64}
+
+@inline _lift(::Type{_BI}, x::_BI) = x
+@inline _lift(::Type{_DI}, x::_BI) = interval(x)
+@inline _is_defined(x::_DI) = Int(decoration(x)) >= Int(def)
+
+_box_empty(b::IntervalBox) = any(k -> isempty_interval(_bi(b[k])), 1:length(b))
+
+_full_mask(n::Int)::UInt64 = n >= 64 ? typemax(UInt64) : (UInt64(1) << n) - UInt64(1)
+
 
 const _SIGNS = (:neg, :zero, :pos)
 @enum Answer Yes No Unknown
@@ -473,3 +480,4 @@ const tolerance = Ref{Float64}(0.01)
 const cache_size = Ref{Int64}(16384)
 global cache = LRU{Any,Any}(maxsize=cache_size[])
 
+const mvf_enabled = Ref{Bool}(true)

@@ -5,7 +5,7 @@ function nondimensionalize_pde(sys::DESys, basis=SI_BASIS)
     end
 
     for eq in vcat(sys.eqs, sys.bcs)
-        if !(eq.rhs==0||ModelingToolkit.get_unit(eq.lhs)==ModelingToolkit.get_unit(eq.rhs))
+        if !(eq.rhs==0||MTK.get_unit(eq.lhs)==MTK.get_unit(eq.rhs))
             throw(IOError("$(eq) has different units on each side"))
         end
     end

@@ -29,70 +29,6 @@ function normalize_expr(expr::Expr)
     return simplify(NORMALIZER(expr))
 end
 
-"""
-    _connected_groups(constraints; key=_ckey)
-
-Split constraints into connected groups: two constraints are in the same group
-when they share a variable, directly or through other constraints. Constraints
-with no variables each form their own group.
-
-Duplicates (same `key`) are dropped. Within a group, constraints are ordered by
-their key, and the groups themselves are ordered by their smallest key, so the
-result is deterministic and independent of the input order.
-
-Returns a vector of `(constraints, variables, keys)` named tuples, where
-`variables` is the group's unique variables in order of first appearance and
-`keys` are the constraint keys in the same order as `constraints`.
-"""
-function _connected_groups(constraints; key=_ckey)
-    seen = Set{UInt64}()
-    cs = Constraint[]
-    ks = UInt64[]
-    for c in constraints
-        k = key(c)
-        k in seen && continue
-        push!(seen, k)
-        push!(cs, c)
-        push!(ks, k)
-    end
-
-    n = length(cs)
-    parent = collect(1:n)
-    function find(i)
-        while parent[i] != i
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        end
-        return i
-    end
-
-    cvars = [_vars_of(c.relation.residual) for c in cs]
-    owner = Dict{Symbolics.Num,Int}()
-    for i in 1:n, v in cvars[i]
-        j = get!(owner, v, i)
-        j == i || (parent[find(i)] = find(j))
-    end
-
-    groups = Dict{Int,Vector{Int}}()
-    for i in 1:n
-        push!(get!(groups, find(i), Int[]), i)
-    end
-
-    result = NamedTuple{(:constraints, :variables, :keys),
-        Tuple{Vector{Constraint},Vector{Symbolics.Num},Vector{UInt64}}}[]
-    for idxs in values(groups)
-        sort!(idxs, by=i -> ks[i])
-        vars = Symbolics.Num[]
-        varset = Set{Symbolics.Num}()
-        for i in idxs, v in cvars[i]
-            v in varset || (push!(varset, v); push!(vars, v))
-        end
-        push!(result, (constraints=cs[idxs], variables=vars, keys=ks[idxs]))
-    end
-    sort!(result, by=g -> first(g.keys))
-    return result
-end
-
 #--------------------------------------------------------------------------
 # Abstraction (expression -> skeleton with dummies)
 #--------------------------------------------------------------------------
@@ -117,22 +53,6 @@ struct Warning
 end
 
 Abstraction() = Abstraction(Region[], Dict{Any,Int}(), Dict{Any,Int}())
-
-# D of a variable, of x(t), or of nested D of those, behaves like a leaf.
-function _is_atomic(a)
-    SU.iscall(a) || return true
-    op = SU.operation(a)
-    op isa SU.Symbolic && return true     # unknown function x(t)
-    op isa SU.Differential &&
-        return _is_atomic(SU.arguments(a)[1])
-    return false
-end
-
-function _is_transparent_diff(expr)
-    op = SU.operation(expr)
-    return op isa SU.Differential &&
-        _is_atomic(SU.arguments(expr)[1])
-end
 
 # Look up or create the region for `new_expr`; returns its dummy.
 function _intern!(ab::Abstraction, new_expr)
@@ -229,22 +149,46 @@ function _expansion_cost(expr, cap::Real)
 end
 
 #--------------------------------------------------------------------------
+# Expansion budget (mutable state for one bounded-expansion run)
+#--------------------------------------------------------------------------
+
+"""
+    ExpansionBudget(limits=ExpansionLimits())
+ 
+Mutable companion to the immutable `ExpansionLimits`. One budget is
+shared by everything expanded in a run, so growth in one region is charged
+against all the others. 
+ 
+- `headroom`: remaining DAG-node allowance. Re-derived at the start of every
+  `bounded_expand` call from `limits.max_nodes`, so it never drifts.
+- `stable`: dummy-free expressions already known to be at a fixpoint.
+"""
+mutable struct ExpansionBudget
+    limits::ExpansionLimits
+    headroom::Int
+    stable::Set{Any}
+end
+
+ExpansionBudget(limits::ExpansionLimits=ExpansionLimits()) =
+    ExpansionBudget(limits, limits.max_nodes, Set{Any}())
+
+#--------------------------------------------------------------------------
 # Per-region improvement
 #--------------------------------------------------------------------------
 
 # Simplify (and conditionally expand) one expression under the shared ledger.
-function _improve(expr, ctx::SimplifyContext)
+function _improve(expr, budget::ExpansionBudget)
     base = _size(expr)
     cur = expr
     seen = Set{Any}([cur])
     converged = false
 
-    for _ in 1:ctx.opts.max_stabilizer_passes
+    for _ in 1:budget.limits.max_passes
         nxt = simplify(cur)
 
-        if _expansion_cost(nxt, ctx.headroom + base) < Inf
+        if _expansion_cost(nxt, budget.headroom + base) < Inf
             ex = simplify(expand(nxt))
-            _size(ex) - base <= ctx.headroom && (nxt = ex)
+            _size(ex) - base <= budget.headroom && (nxt = ex)
         end
 
         if nxt in seen      # fixpoint, or oscillation (both mean stop)
@@ -255,16 +199,16 @@ function _improve(expr, ctx::SimplifyContext)
         cur = nxt
     end
 
-    ctx.headroom -= _size(cur) - base    # growth is charged, shrinkage refunded
+    budget.headroom -= _size(cur) - base    # growth is charged, shrinkage refunded
     return cur, converged
 end
 
 # Simplify every dirty region, then record which results are trustworthy.
-function _simplify_regions!(ab::Abstraction, ctx::SimplifyContext)
+function _simplify_regions!(ab::Abstraction, budget::ExpansionBudget)
     sub = _restore_all(ab)
     dirty = Region[]
     for r in ab.regions
-        if sub[r.dummy] in ctx.stable
+        if sub[r.dummy] in budget.stable
             r.state = :stable
         else
             push!(dirty, r)
@@ -277,7 +221,7 @@ function _simplify_regions!(ab::Abstraction, ctx::SimplifyContext)
     changed = Set{Int}()
     for r in dirty
         old = r.expr
-        r.expr, conv = _improve(r.expr, ctx)
+        r.expr, conv = _improve(r.expr, budget)
         r.state = conv ? :converged : :capped
         isequal(old, r.expr) || push!(changed, ab.by_dummy[r.dummy])
     end
@@ -290,23 +234,46 @@ function _simplify_regions!(ab::Abstraction, ctx::SimplifyContext)
             push!(tainted, i)
         end
         if r.state === :converged && !any(d -> d in tainted, deps)
-            push!(ctx.stable, sub[r.dummy])
+            push!(budget.stable, sub[r.dummy])
         end
     end
     return sub
 end
 
-function classify_residuals!(residuals, ctx::SimplifyContext)
-    for (i, res) in enumerate(residuals)
-        v = SU.unwrap_const(unwrap(res))
-        local class
-        if v isa Number
-            iszero(v) ? class = :identity : class = :contradiction
-        else
-            class = :normal
-        end
-        (class === :contradiction || class === :identity) && push!(ctx.warnings, Warning(i, class, "residual $i simplified to a$(class)"))
-    end
+#--------------------------------------------------------------------------
+# Bounded expansion: public entry points
+#--------------------------------------------------------------------------
+
+"""
+    bounded_expand(exprs, budget) -> Vector
+ 
+Simplify and (where affordable) expand a batch of unwrapped expressions under
+`budget`. The batch is abstracted jointly, so non-algebraic subexpressions that
+occur in several expressions are improved once and shared. Leaves (a lone symbol
+or number) map to themselves.
+"""
+function bounded_expand(exprs::AbstractVector, budget::ExpansionBudget)
+    ab = Abstraction()
+    roots = [_abstract_root!(e, ab) for e in exprs]
+    # Re-derive the ledger from the actual state every call (no drift).
+    budget.headroom = budget.limits.max_nodes - sum(r -> _size(r.expr), ab.regions; init=0)
+    isempty(ab.regions) && return Any[roots...]
+    sub = _simplify_regions!(ab, budget)
+    return Any[get(sub, root, root) for root in roots]
+end
+
+bounded_expand(expr, budget::ExpansionBudget) = only(bounded_expand([expr], budget))
+
+"""
+    expand_derivatives_bounded(expr, limits) -> expr
+ 
+`expand_derivatives` with a size guard: if the expanded form reaches
+`limits.max_derivative_nodes`, the original expression is returned unchanged.
+Takes and returns an unwrapped expression.
+"""
+function expand_derivatives_bounded(expr, limits::ExpansionLimits)
+    cand = Symbolics.unwrap(expand_derivatives(Symbolics.wrap(expr), simplify=true))
+    return _size(cand) >= limits.max_derivative_nodes ? expr : cand
 end
 
 function _is_algebraic(expr)
@@ -314,6 +281,117 @@ function _is_algebraic(expr)
     op = SU.operation(expr)
     op in ALGEBRAIC_OPS || return false
     return all(_is_algebraic, SU.arguments(expr))
+end
+
+# True if some transcendental (non-algebraic function) has a non-leaf argument,
+# e.g. exp(x + y) or sin(x*y), but not exp(x) or x(t).
+function _needs_safe_expand(expr)
+    SU.iscall(expr) || return false
+    _is_transparent_diff(expr) && return false
+    op = SU.operation(expr)
+    args = SU.arguments(expr)
+    if op isa Function && !(op isa SU.Differential) && !(op in ALGEBRAIC_OPS)
+        all(_is_leafish, args) || return true
+    end
+    return any(_needs_safe_expand, args)
+end
+
+"""
+    _expand_residual(expr, limits_or_budget=ExpansionLimits())
+ 
+Expand one residual. Plain algebraic expressions use `Symbolics.expand`
+directly; anything with a transcendental of a compound argument goes through
+`bounded_expand`. Given `ExpansionLimits`, a fresh budget is made per call so
+one residual's growth is never charged to another; pass an `ExpansionBudget`
+to share one deliberately.
+"""
+function _expand_residual(expr::Symbolics.Num, budget::ExpansionBudget)
+    u = Symbolics.unwrap(expr)
+    (_is_algebraic(u) || !_needs_safe_expand(u)) && return Symbolics.expand(expr)
+    return Symbolics.wrap(bounded_expand(u, budget))
+end
+
+_expand_residual(expr::Symbolics.Num, limits::ExpansionLimits=ExpansionLimits()) =
+    _expand_residual(expr, ExpansionBudget(limits))
+
+#--------------------------------------------------------------------------
+# Coefficient grouping by derivative depth
+#--------------------------------------------------------------------------
+function _is_target(e, unwrapped_dvs::Set, dv_ops)
+    # If it is a leaf node, check if it matches any dependent variable directly
+    if !SU.iscall(e)
+        return e in unwrapped_dvs
+    end
+
+    op = SU.operation(e)
+
+    # Check if the operation matches any of our base dependent operations
+    if any(isequal(op, d_op) for d_op in dv_ops)
+        return true
+    end
+
+    # Support mixed derivatives by recursively checking arguments
+    if op isa Differential
+        args = SU.arguments(e)
+        return _is_target(args[1], unwrapped_dvs, dv_ops)
+    end
+
+    return false
+end
+
+function _find_targets!(e, unwrapped_dvs::Set, dv_ops, targets::Set)
+    # If we found a target, add it and stop recursing
+    if _is_target(e, unwrapped_dvs, dv_ops)
+        push!(targets, e)
+        return
+    end
+
+    # Otherwise, keep digging through the expression tree
+    if SU.iscall(e)
+        for arg in SU.arguments(e)
+            _find_targets!(arg, unwrapped_dvs, dv_ops, targets)
+        end
+    end
+end
+
+function _diff_depth(e)
+    if !SU.iscall(e)
+        return 0
+    end
+    # Increment depth for each Differential operation
+    if SU.operation(e) isa Differential
+        return 1 + _diff_depth(SU.arguments(e)[1])
+    end
+    return 0
+end
+
+function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
+    expr = expand_derivatives(unwrap(eq.lhs - eq.rhs))
+    unwrapped_dvs = Set([unwrap(d) for d in dvs])
+    dv_ops = [SU.operation(unwrap(d)) for d in dvs]
+
+    targets = Set()
+    # Pass the required state into the mutator function
+    _find_targets!(expr, unwrapped_dvs, dv_ops, targets)
+
+    # Sort targets safely using the external helper
+    sorted_targets = sort(collect(targets), by=_diff_depth, rev=true)
+
+    grouped_expr = 0
+    remainder = expr
+    for target in sorted_targets
+        max_deg = Symbolics.degree(remainder)
+        for p in max_deg:-1:1
+            target_term = p == 1 ? target : target^p
+            coeff = simplify(Symbolics.coeff(remainder, target_term))
+            if !isequal(coeff, 0)
+                grouped_expr += coeff * wrap(target_term)
+                remainder = simplify(remainder - coeff * target_term)
+            end
+        end
+    end
+    grouped_expr += simplify(remainder)
+    return grouped_expr ~ 0
 end
 
 #=
