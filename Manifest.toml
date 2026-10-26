@@ -2,7 +2,7 @@
 
 julia_version = "1.13.2"
 manifest_format = "2.1"
-project_hash = "d179dc2d5d91d3be3f48dd88d8fa9c07934cc173"
+project_hash = "311cfcad8a11a261c895fb99dddc4100522a1d1b"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -29,18 +29,20 @@ uuid = "14f7f29c-3bd6-536c-9a0b-7339e30b5a3e"
 version = "0.5.4"
 
 [[deps.AbstractAlgebra]]
-deps = ["Compat", "LinearAlgebra", "MacroTools", "PrecompileTools", "Preferences", "Random", "RandomExtensions", "SparseArrays"]
-git-tree-sha1 = "0aa1b711b49aa207ac3d8fa6f2a78225e3130c0e"
+deps = ["Compat", "LinearAlgebra", "MacroTools", "PrecompileTools", "Preferences", "Random", "RandomExtensions"]
+git-tree-sha1 = "989b62cb44d6b6b9868ef05e369abcbb2f8a1b59"
 registries = "General"
 uuid = "c3fe647b-3220-5bb0-a1ea-a7954cac585d"
-version = "0.50.4"
+version = "0.51.2"
 
     [deps.AbstractAlgebra.extensions]
     IJuliaExt = "IJulia"
+    SparseArraysExt = "SparseArrays"
     TestExt = "Test"
 
     [deps.AbstractAlgebra.weakdeps]
     IJulia = "7073ff75-c697-5162-941a-fcdaad2a7d2a"
+    SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
     Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [[deps.AbstractPlutoDingetjes]]
@@ -706,10 +708,10 @@ version = "1.11.0"
 
 [[deps.FillArrays]]
 deps = ["LinearAlgebra"]
-git-tree-sha1 = "417289ac840d201005d9ed16789a46defccbe36d"
+git-tree-sha1 = "831f86fde78ab7f6470d6ba4d1161a11fb6b4ec0"
 registries = "General"
 uuid = "1a297f60-69ca-5386-bcde-b61e274b549b"
-version = "1.18.1"
+version = "1.18.2"
 weakdeps = ["PDMats", "SparseArrays", "StaticArrays", "Statistics"]
 
     [deps.FillArrays.extensions]
@@ -1435,10 +1437,10 @@ version = "1.1.5"
 
 [[deps.Nemo]]
 deps = ["AbstractAlgebra", "FLINT_jll", "LinearAlgebra", "Random", "RandomExtensions", "SHA"]
-git-tree-sha1 = "9a1c91731d5127666be24468faf6da924fe71c3d"
+git-tree-sha1 = "1e007cc858a2ae75830bad8ec360ba26b3da2f5a"
 registries = "General"
 uuid = "2edaba10-b0f1-5616-af89-8c11ac63239a"
-version = "0.56.2"
+version = "0.57.1"
 
 [[deps.NetworkOptions]]
 uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
