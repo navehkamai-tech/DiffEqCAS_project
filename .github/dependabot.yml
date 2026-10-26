@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: "julia"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "julia"
+    commit-message:
+      prefix: "deps"
