@@ -20,6 +20,18 @@ _simplification_expression(eq::SymEquation) = eq.residual
 _simplification_expression(expr) = expr
 _normalize_restriction(r::SymRelation) = SymRelation(normalize_expr(r.residual), r.relation)
 
+function classify_residuals!(residuals, ctx::SimplifyContext)
+    for (i, res) in enumerate(residuals)
+        v = SU.unwrap_const(unwrap(res))
+        local class
+        if v isa Number
+            iszero(v) ? class = :identity : class = :contradiction
+        else
+            class = :normal
+        end
+        (class === :contradiction || class === :identity) && push!(ctx.warnings, Warning(i, class, "residual $i simplified to a$(class)"))
+    end
+end
 """
 Cancel only domain-certified common factors.
 Candidate discovery and semantic cancellation are deliberately separate:
@@ -69,33 +81,50 @@ function _factorization_partition(sys::DESys, factors)
     DESys[]
 end
 
+#--------------------------------------------------------------------------
+# Context & diagnostics
+#--------------------------------------------------------------------------
+struct Warning
+    eq_index::Int
+    symbol::Symbol
+    message::String
+end
+
+"""
+Per-run state of the simplifier. Expansion bookkeeping (growth ledger, cache of
+expressions already at a fixpoint) lives in `budget`, which is what gets handed
+to algebra.jl; everything else here is simplifier-only.
+"""
 mutable struct SimplifyContext
-    opts::Any                  # simplification options
-    stable::Set{Any}           # DUMMY-FREE exprs known to be at a fixpoint
-    headroom::Int              # remaining DAG-node allowance
+    opts::SimplificationOptions
+    budget::ExpansionBudget
     warnings::Vector{Warning}
 end
 
-SimplifyContext(opts) = SimplifyContext(opts, Set{Any}(), 0, Warning[])
+SimplifyContext(opts::SimplificationOptions) =
+    SimplifyContext(opts, ExpansionBudget(opts.expansion), Warning[])
+
+function classify_residuals!(residuals, ctx::SimplifyContext)
+    for (i, res) in enumerate(residuals)
+        v = SU.unwrap_const(unwrap(res))
+        v isa Number || continue
+        class = iszero(v) ? :identity : :contradiction
+        push!(ctx.warnings, Warning(i, class, "residual $i simplified to a $class"))
+    end
+end
 
 #--------------------------------------------------------------------------
 # Phases (each: Vector of unwrapped residuals -> Vector of unwrapped residuals)
 #--------------------------------------------------------------------------
 
 function _attempt_expand_derivatives(expr, ctx::SimplifyContext)
-    ctx.opts.expand_derivatives == true || return expr
-    cand = Symbolics.unwrap(expand_derivatives(Symbolics.wrap(expr), simplify=true))
-    return _size(cand) >= ctx.opts.max_derivative_nodes ? expr : cand
+    ctx.opts.expand_derivatives || return expr
+    return expand_derivatives_bounded(expr, ctx.opts.expansion)
 end
 
 function _algebraic_pass(res, ctx::SimplifyContext)
-    ctx.opts.expand_products == true || return res
-    ab = Abstraction()
-    roots = [_abstract_root!(r, ab) for r in res]
-    # Re-derive the ledger from the actual state every pass (no drift).
-    ctx.headroom = ctx.opts.max_nodes - sum(r -> _size(r.expr), ab.regions; init=0)
-    sub = _simplify_regions!(ab, ctx)
-    return [get(sub, root, root) for root in roots]   # leaves map to themselves
+    ctx.opts.expand_products || return res
+    return bounded_expand(res, ctx.budget)
 end
 
 function _nonalgebraic_pass(res, ctx::SimplifyContext)
@@ -128,7 +157,7 @@ function _simplify_branch_eqs(sys::DESys, options::SimplificationOptions=Simplif
         res = new
         new in seen && break
         push!(seen, new)
-        ctx.headroom <= 0 && break
+        ctx.budget.headroom <= 0 && break
     end
 
     classify_residuals!(res, ctx)
@@ -137,7 +166,7 @@ end
 
 """
     simplify_system(sys; options...)
-
+ 
 Simplify every active branch in a system through the staged pipeline.
 """
 function simplify_system(sys::DETree;
@@ -152,82 +181,3 @@ function simplify_system(sys::DETree;
     return sys
 end
 
-# ===========================================================================
-# 1. Coefficient Grouping by Derivative Depth
-# ===========================================================================
-function _is_target(e, unwrapped_dvs::Set, dv_ops)
-    # If it is a leaf node, check if it matches any dependent variable directly
-    if !SU.iscall(e)
-        return e in unwrapped_dvs
-    end
-
-    op = SU.operation(e)
-
-    # Check if the operation matches any of our base dependent operations
-    if any(isequal(op, d_op) for d_op in dv_ops)
-        return true
-    end
-
-    # Support mixed derivatives by recursively checking arguments
-    if op isa Differential
-        args = SU.arguments(e)
-        return _is_target(args[1], unwrapped_dvs, dv_ops)
-    end
-
-    return false
-end
-
-function _find_targets!(e, unwrapped_dvs::Set, dv_ops, targets::Set)
-    # If we found a target, add it and stop recursing
-    if _is_target(e, unwrapped_dvs, dv_ops)
-        push!(targets, e)
-        return
-    end
-
-    # Otherwise, keep digging through the expression tree
-    if SU.iscall(e)
-        for arg in SU.arguments(e)
-            _find_targets!(arg, unwrapped_dvs, dv_ops, targets)
-        end
-    end
-end
-
-function _diff_depth(e)
-    if !SU.iscall(e)
-        return 0
-    end
-    # Increment depth for each Differential operation
-    if SU.operation(e) isa Differential
-        return 1 + _diff_depth(SU.arguments(e)[1])
-    end
-    return 0
-end
-
-function group_coefficients(eq::Symbolics.Equation, dvs::Vector{Symbolics.Num})
-    expr = expand_derivatives(unwrap(eq.lhs - eq.rhs))
-    unwrapped_dvs = Set([unwrap(d) for d in dvs])
-    dv_ops = [SU.operation(unwrap(d)) for d in dvs]
-
-    targets = Set()
-    # Pass the required state into the mutator function
-    _find_targets!(expr, unwrapped_dvs, dv_ops, targets)
-
-    # Sort targets safely using the external helper
-    sorted_targets = sort(collect(targets), by=_diff_depth, rev=true)
-
-    grouped_expr = 0
-    remainder = expr
-    for target in sorted_targets
-        max_deg = Symbolics.degree(remainder)
-        for p in max_deg:-1:1
-            target_term = p == 1 ? target : target^p
-            coeff = simplify(Symbolics.coeff(remainder, target_term))
-            if !isequal(coeff, 0)
-                grouped_expr += coeff * wrap(target_term)
-                remainder = simplify(remainder - coeff * target_term)
-            end
-        end
-    end
-    grouped_expr += simplify(remainder)
-    return grouped_expr ~ 0
-end
