@@ -2,7 +2,7 @@
 
 julia_version = "1.13.2"
 manifest_format = "2.1"
-project_hash = "b970992b32e69edda89a8b9be2e798398646d97e"
+project_hash = "fc8bf5ed7a7fca06e51c237a1d4b0522f8720737"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -836,10 +836,10 @@ version = "0.1.4"
 
 [[deps.Integrals]]
 deps = ["ArrayInterface", "CommonSolve", "HCubature", "LinearAlgebra", "MonteCarloIntegration", "PrecompileTools", "QuadGK", "Random", "Reexport", "SciMLBase", "SciMLLogging"]
-git-tree-sha1 = "0109e489053311bc562ef850720979d2313f3609"
+git-tree-sha1 = "2187e5d5cbc498d8b5d2c47c10b0ddada7064557"
 registries = "General"
 uuid = "de52edbc-65ea-441a-8357-d3a637375a31"
-version = "5.5.3"
+version = "5.5.4"
 
     [deps.Integrals.extensions]
     IntegralsArblibExt = "Arblib"
