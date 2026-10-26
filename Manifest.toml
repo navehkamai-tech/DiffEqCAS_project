@@ -2,7 +2,7 @@
 
 julia_version = "1.13.2"
 manifest_format = "2.1"
-project_hash = "2ea47f93fb772a024dc98d2225b728d369f5d4b8"
+project_hash = "ba13c8c1f7eec33fe64c7c4594b01dd1391603b0"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -1964,10 +1964,10 @@ weakdeps = ["AMD"]
 
 [[deps.SpecialFunctions]]
 deps = ["IrrationalConstants", "LogExpFunctions", "OpenLibm_jll", "OpenSpecFun_jll"]
-git-tree-sha1 = "429071b23f4c9a13fb6582f807cc2ef454082408"
+git-tree-sha1 = "88ef0d98204515bc53dd4aaea5f7788882d1b66c"
 registries = "General"
 uuid = "276daf66-3868-5448-9aa4-cd146d93841b"
-version = "2.9.0"
+version = "2.9.1"
 
     [deps.SpecialFunctions.extensions]
     SpecialFunctionsChainRulesCoreExt = "ChainRulesCore"
