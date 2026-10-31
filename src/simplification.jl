@@ -1,3 +1,26 @@
+#--------------------------------------------------------------------------
+# Context & diagnostics
+#--------------------------------------------------------------------------
+struct Warning
+    eq_index::Int
+    symbol::Symbol
+    message::String
+end
+
+"""
+Per-run state of the simplifier. Expansion bookkeeping (growth ledger, cache of
+expressions already at a fixpoint) lives in `budget`, which is what gets handed
+to algebra.jl; everything else here is simplifier-only.
+"""
+mutable struct SimplifyContext
+    opts::SimplificationOptions
+    budget::ExpansionBudget
+    warnings::Vector{Warning}
+end
+
+SimplifyContext(opts::SimplificationOptions) =
+    SimplifyContext(opts, ExpansionBudget(opts.expansion), Warning[])
+
 """
 Build a system from transformed residual expressions while preserving all
 system metadata. Boundary conditions are normalized by the same expression
@@ -32,6 +55,7 @@ function classify_residuals!(residuals, ctx::SimplifyContext)
         (class === :contradiction || class === :identity) && push!(ctx.warnings, Warning(i, class, "residual $i simplified to a$(class)"))
     end
 end
+
 """
 Cancel only domain-certified common factors.
 Candidate discovery and semantic cancellation are deliberately separate:
@@ -79,38 +103,6 @@ end
 
 function _factorization_partition(sys::DESys, factors)
     DESys[]
-end
-
-#--------------------------------------------------------------------------
-# Context & diagnostics
-#--------------------------------------------------------------------------
-struct Warning
-    eq_index::Int
-    symbol::Symbol
-    message::String
-end
-
-"""
-Per-run state of the simplifier. Expansion bookkeeping (growth ledger, cache of
-expressions already at a fixpoint) lives in `budget`, which is what gets handed
-to algebra.jl; everything else here is simplifier-only.
-"""
-mutable struct SimplifyContext
-    opts::SimplificationOptions
-    budget::ExpansionBudget
-    warnings::Vector{Warning}
-end
-
-SimplifyContext(opts::SimplificationOptions) =
-    SimplifyContext(opts, ExpansionBudget(opts.expansion), Warning[])
-
-function classify_residuals!(residuals, ctx::SimplifyContext)
-    for (i, res) in enumerate(residuals)
-        v = SU.unwrap_const(unwrap(res))
-        v isa Number || continue
-        class = iszero(v) ? :identity : :contradiction
-        push!(ctx.warnings, Warning(i, class, "residual $i simplified to a $class"))
-    end
 end
 
 #--------------------------------------------------------------------------

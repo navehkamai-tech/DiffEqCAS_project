@@ -89,28 +89,20 @@ const ABSOLUTE_VALUE_RULES = [
     # need to add rules here for the sign function
 ]
 
-const SYMBOLIC_RULE_GROUPS = (
-    function_arguments=vcat(EXP_LOG_RULES, TRIGONOMETRIC_RULES),
-    positive_domain=vcat(POWER_RULES, ABSOLUTE_VALUE_RULES),
-)
-
 # TODO: Build stage-specific rewriters from SYMBOLIC_RULE_GROUPS.  Predicates
 # must prove positivity, reality, or integrality before enabling a group.
 
 #defining special functions
 #Dirac Delta function
 @register_symbolic Dirac(x::AbstractVector, n::Any)
-@register_symbolic Dirac(x::AbstractVector) false
-@register_symbolic Dirac(x::Symbolics.Num, n::Int) false
-@register_symbolic Dirac(x::Symbolics.Num) false
-#@register_symbolic Dirac(x::Symbolics.Arr, n::Any)
-#@register_symbolic Dirac(x::Symbolics.Arr)
+#@register_symbolic Dirac(x::AbstractVector) false
+#@register_symbolic Dirac(x::Symbolics.Num, n::Int) false
+#@register_symbolic Dirac(x::Symbolics.Num) false
 
 
 #Heaviside step function
 @register_symbolic Heaviside(x::AbstractVector)
-@register_symbolic Heaviside(x::Symbolics.Num) false
-@register_symbolic Heaviside(x::Symbolics.Arr)
+#@register_symbolic Heaviside(x::Symbolics.Num) false
 
 
 function is_array_literal(x)

@@ -71,27 +71,6 @@ struct SymRelation
     end
 end
 
-function SymRelation(residual, relation; limits=ExpansionLimits())
-    rel = _relation_symbol(relation)
-    res = _as_num(normalize_expr(_as_num(residual)))
-    res = _as_num(_expand_residual(res, limits))
-    res = Symbolics.simplify(res)
-    type = _classify_residual(res, rel)
-    type in (:d, :i, :p) && ((res, rel) = _canonicalize(res, rel))
-    key = hash(Symbolics.unwrap(res), hash(rel))
-    return SymRelation(res, rel, type, key)
-end
-
-# `x > 1`  ->  SymRelation(x - 1, _GT)
-function SymRelation(expr::Symbolics.Num)
-    unwrapped = Symbolics.unwrap(expr)
-    SU.iscall(unwrapped) ||
-        throw(ArgumentError("must be an expression"))
-    op = _relation_symbol(SU.operation(unwrapped), "a SymRelation must be a relation such as `x > 0`, got")
-    lhs, rhs = SU.arguments(unwrapped)
-    return SymRelation(wrap(lhs) - wrap(rhs), op)
-end
-
 struct SymEquation
     id::EqId
     residual::Symbolics.Num
@@ -443,7 +422,7 @@ _full_mask(n::Int)::UInt64 = n >= 64 ? typemax(UInt64) : (UInt64(1) << n) - UInt
 
 
 const _SIGNS = (:neg, :zero, :pos)
-@enum Answer Yes No Unknown
+@enum Answer Yes No Undetermined
 
 struct Comp
     constraints::Vector{Constraint}
@@ -461,9 +440,9 @@ Base.@kwdef struct Evidence
     outer::_BI = _entire_bi()
     strict_lo::Bool = false
     strict_hi::Bool = false
-    neg::Answer = Unknown
-    zero::Answer = Unknown
-    pos::Answer = Unknown
+    neg::Answer = Undetermined
+    zero::Answer = Undetermined
+    pos::Answer = Undetermined
     ident_zero::Bool = false
 end
 

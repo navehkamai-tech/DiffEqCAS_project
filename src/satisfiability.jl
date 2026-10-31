@@ -3,9 +3,9 @@
 #------------------------------------------------
 
 _answer(i::Evidence, w::Symbol) = w === :neg ? i.neg : w === :zero ? i.zero : i.pos
-_decided(i::Evidence, want) = all(w -> _answer(i, w) !== Unknown, want)
+_decided(i::Evidence, want) = all(w -> _answer(i, w) !== Undetermined, want)
 
-_to_answer(s::Symbol)::Answer = s === :sat ? Yes : s === :unsat ? No : Unknown
+_to_answer(s::Symbol)::Answer = s === :sat ? Yes : s === :unsat ? No : Undetermined
 
 _make_box(ivs::Vector{_BI}) = IntervalBox(ivs)
 
@@ -17,7 +17,7 @@ end
 _set_answer(i::Evidence, w::Symbol, a::Answer) =
     w === :neg ? _with(i; neg=a) : w === :zero ? _with(i; zero=a) : _with(i; pos=a)
 
-_join(x::Answer, y::Answer) = x === y ? x : x === Unknown ? y : y === Unknown ? x : No
+_join(x::Answer, y::Answer) = x === y ? x : x === Undetermined ? y : y === Undetermined ? x : No
 
 function _rel_from_want(want::Symbol)
     want === :neg && return _LT
@@ -247,16 +247,16 @@ function _bounded(box::IntervalBox)
 end
 
 function _bound_evidence(b::_Bnd, exact::Bool)::Evidence
-    neg = exact && b.lo < 0 ? Yes : Unknown
-    pos = exact && b.hi > 0 ? Yes : Unknown
+    neg = exact && b.lo < 0 ? Yes : Undetermined
+    pos = exact && b.hi > 0 ? Yes : Undetermined
     zer = exact && (b.lo < 0 || (b.lo == 0 && !b.slo)) &&
-        (b.hi > 0 || (b.hi == 0 && !b.shi)) ? Yes : Unknown
+        (b.hi > 0 || (b.hi == 0 && !b.shi)) ? Yes : Undetermined
     return _tighten(Evidence(_bi(b.lo, b.hi), b.slo, b.shi, neg, zer, pos, false))
 end
 
 # FIX: CompFacts is (exact, feasible, algebraic); the old call had the first two swapped.
 function _compute_facts(comp::Comp)::CompFacts
-    ckey = (comp.key,)
+    ckey = (comp.key, ())
     bnds = Dict{Symbolics.Num,_Bnd}(v => _Bnd() for v in comp.variables)
     feasible = true
     exact = true
@@ -331,18 +331,14 @@ _s_add(a::_Signs, b::_Signs) = _Signs(
     (a.zero && b.zero) || (a.pos && b.neg) || (a.neg && b.pos),
     (a.pos && _hasvals(b)) || (b.pos && _hasvals(a)))
 
-function _s_powint(a::_Signs, n::Int)
-    n == 0 && return _Signs(false, false, _hasvals(a))
+function _s_powint(a::_Signs, n::Real)      # n must be an integer value
+    iszero(n) && return _Signs(false, false, _hasvals(a))
     n < 0 && return _s_powint(_s_inv(a), -n)
-    return iseven(n) ? _Signs(false, a.zero, a.neg || a.pos) : a
+    return iszero(mod(n, 2)) ? _Signs(false, a.zero, a.neg || a.pos) : a
 end
 
-# constant exponent: only the base's signs are needed
 function _s_pow(a::_Signs, p::Real)
-    if isinteger(p) && abs(p) < 1_000_000
-        return _s_powint(a, Int(p))
-    end
-    # non-integer: negative base undefined, 0^p only defined for p > 0
+    isinteger(p) && return _s_powint(a, p)
     return _Signs(false, p > 0 && a.zero, a.pos)
 end
 
@@ -386,6 +382,13 @@ end
 const _UNARY_INTERVAL_OPS = (exp, exp2, exp10, log, log2, log10, sin, cos, tan,
     asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, abs, sqrt)
 
+function _i_pow(x, p::Real)
+    if isinteger(p) && abs(p) < 1_000_000
+        return pown(x, Int(p))
+    end
+    return pow(x, _bi(p))
+end
+
 # -> (outer, strict_lo, strict_hi)
 function _interval_rule(op, args, kids)
     X = _BI[k.outer for k in kids]
@@ -400,12 +403,14 @@ function _interval_rule(op, args, kids)
         kids[1].strict_hi || kids[2].strict_lo
     elseif op === (/) && n == 2
         return X[1] / X[2], false, false
-    elseif op === (^) && n == 2
-        p = _const_value(args[2])
-        if p !== nothing && isinteger(p) && abs(p) < 1_000_000
-            return pow(X[1], Int(p)), false, false
+    elseif op === (^)
+        p = length(args) >= 2 ? _const_value(args[2]) : nothing
+        if p !== nothing && n >= 1
+            return _i_pow(X[1], p), false, false
+        elseif n == 2
+            return pow(X[1], X[2]), false, false
         end
-        return pow(X[1], X[2]), false, false
+        return _entire_bi(), false, false
     elseif n == 1 && op in _UNARY_INTERVAL_OPS
         return op(X[1]), false, false
     end
@@ -440,7 +445,7 @@ function _combine(op, args, kids::Vector{Evidence})::Evidence
     outer, slo, shi = _interval_rule(op, args, kids)
     s = _sign_rule(op, args, kids)
     return _tighten(Evidence(outer, slo, shi,
-        s.neg ? Unknown : No, s.zero ? Unknown : No, s.pos ? Unknown : No, false))
+        s.neg ? Undetermined : No, s.zero ? Undetermined : No, s.pos ? Undetermined : No, false))
 end
 
 function _derive(u, ctx::Ctx)::Evidence
@@ -571,7 +576,7 @@ function _expr_evidence(expr, ctx::Ctx, want::Tuple)::Evidence
     box = _make_box(sys.ivs)
     miss = Symbol[]
     for w in want
-        _answer(evidence, w) !== Unknown && continue
+        _answer(evidence, w) !== Undetermined && continue
         probe = Constraint(0, SymRelation(u, _rel_from_want(w)))
         # probe first: it is the one constraint that must never be dropped
         contracted = _contract(box, vcat(Constraint[probe], sys.constraints), sys.variables)
@@ -584,7 +589,7 @@ function _expr_evidence(expr, ctx::Ctx, want::Tuple)::Evidence
         else
             ans = _to_answer(_pave_contracted(contracted))
         end
-        if ans === Unknown
+        if ans === Undetermined
             push!(miss, w)
         else
             evidence = _store!(u, ctx.key, _set_answer(evidence, w, ans))
@@ -651,7 +656,7 @@ function satisfiable(src)::Answer
     for comp in _as_comps(src)
         a = _sat_comp(comp)
         a === No && return No
-        a === Unknown && (result = Unknown)
+        a === Undetermined && (result = Undetermined)
     end
     return result
 end

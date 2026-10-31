@@ -8,7 +8,7 @@ module DiffEqCAS
 
 using Symbolics
 using LinearAlgebra
-using DomainSets
+
 import ModelingToolkit as MTK
 using DynamicQuantities
 using IntervalBoxes
@@ -62,14 +62,16 @@ export change_dvs!, change_ivs!, change_parameters!
 export change_dvs, change_ivs, change_parameters
 export custom_rewrite, get_base_op, group_coefficients, nondimensionalize_pde
 
-# ---------------------------------------------------------------------------
-# Layer 1: Foundation (Constants, Pure Utils, & All Shared Structs)
-# ---------------------------------------------------------------------------
+# constant helper submodule
 include("constants.jl")
 using .Constants
 
+# ---------------------------------------------------------------------------
+# Layer 1: Foundation (Constants, Pure Utils, & All Shared Structs)
+# ---------------------------------------------------------------------------
 include("types.jl")
 include("utils.jl")
+include("algebra.jl")
 
 # ---------------------------------------------------------------------------
 # Layer 2: Domain & satisfiability (Symbolic Topology & Paving Engine)
@@ -83,11 +85,6 @@ include("domains.jl")
 # ---------------------------------------------------------------------------
 include("system_ops.jl")
 include("display.jl")
-
-# ---------------------------------------------------------------------------
-# Layer 4: Domain-Aware Inference & Symbolic Rules
-# ---------------------------------------------------------------------------
-include("symbolic_rules.jl") # as per the plan the rules will each go where they belong, there won't be a unified rules file
 
 # ---------------------------------------------------------------------------
 # Layer 5: Simplification, Transformations

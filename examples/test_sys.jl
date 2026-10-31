@@ -1,17 +1,17 @@
 using ModelingToolkit
 using Symbolics
-using DomainSets
+
 
 using DiffEqCAS
 
 @parameters t x
-@variables u(t,x)[1:2]
+@variables u(t, x)[1:2]
 
 Dt = Differential(t)
 Dx = Differential(x)
 
 eqs = [Dt(u[1]) ~ Dx(Dx(u[1])) + u[2],
-       Dt(u[2]) ~ Dx(Dx(u[2])) + u[1]]
+    Dt(u[2]) ~ Dx(Dx(u[2])) + u[1]]
 
 dvs = [u[1], u[2]]
 

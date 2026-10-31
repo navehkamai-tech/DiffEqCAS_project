@@ -1,11 +1,11 @@
 using ModelingToolkit
 using Symbolics
-using DomainSets
+
 
 using DiffEqCAS
 
 @parameters t x
-@variables u(t,x)[1:2]
+@variables u(t, x)[1:2]
 
 Dt = Differential(t)
 Dx = Differential(x)

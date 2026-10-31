@@ -16,10 +16,6 @@ _key_variables(key) = key isa Tuple ? key : (key,)
 # Symbolic values may return symbolic expressions from `==`, so use `isequal`.
 _contains_equal(values, target) = any(value -> isequal(value, target), values)
 
-_additive_terms(expr) = collect(terms(unwrap(expr)))
-
-_multiplicative_factors(expr) = collect(Symbolics.factors(unwrap(expr)))
-
 _as_num(v) = v isa Symbolics.Num ? v : Symbolics.wrap(v)
 
 _inv(c) = c isa Integer ? 1//c : inv(c)
@@ -40,7 +36,7 @@ function _is_transparent_diff(expr)
         _is_atomic(SU.arguments(expr)[1])
 end
 
-_is_leafish(a) = _is_atomic(_strip_getindex(a))
+_atomic(a) = _is_atomic(_strip_getindex(a))
 
 # x(t)[1] -> x(t)
 function _strip_getindex(v)
@@ -62,8 +58,38 @@ end
 function _vars_of(expr)::Vector{Symbolics.Num}
     u = Symbolics.unwrap(expr)
     u isa Number && return Symbolics.Num[]
-    return Symbolics.Num[_as_num(v) for v in Symbolics.get_variables(u)]
+    vs = Symbolics.Num[_as_num(v) for v in get_variables(u)]
+    length(vs) <= 1 && return vs               # nothing to sort
+    return vs[sortperm(string.(vs))]           # stringify each variable once
 end
+
+function _additive_terms(expr)
+    vec = terms(unwrap(expr))
+    n = length(vec)
+    n <= 1 && return vec
+
+    keys = String[]
+    idx = Int[]
+    consts = Int[]
+    sizehint!(keys, n)
+    sizehint!(idx, n)
+
+    for i in 1:n
+        vs = _vars_of(vec[i])
+        if isempty(vs)
+            push!(consts, i)
+        else
+            push!(keys, string(first(vs)))     # already the smallest by string
+            push!(idx, i)
+        end
+    end
+
+    order = idx[sortperm(keys)]                # stable
+    append!(order, consts)                     # constants last
+    return vec[order]
+end
+
+_multiplicative_factors(expr) = collect(Symbolics.factors(unwrap(expr)))
 
 function _push_unique!(arr, new_vals)
     for new_val in new_vals
@@ -231,6 +257,7 @@ is_integer(x) = x isa Integer
 is_domain(x) = x isa SymDomain
 is_rational(x) = x isa Rational
 is_even(x) = x isa Integer && (x%2==0)
+is_float(x) = x isa AbstractFloat
 
 # ---------------------------------------------------------------------------
 # 1. Relation utils
@@ -436,7 +463,7 @@ _ckey(c::Constraint) = hash(Symbolics.unwrap(c.relation.residual), hash(c.relati
 # Block key: hash of its constraint keys, which must already be in canonical order.
 _comp_key(constraint_keys) = hash(Tuple(constraint_keys))
 # Parameter key: the keys of its constraints (constraints are kept sorted by key).
-_pkey(constraints::Vector{Constraint}) = Tuple(c.key for c in constraints)
+_pkey(constraints::Vector{Constraint}) = Tuple(_ckey(c) for c in constraints)
 # Context key: the keys of its blocks (blocks are kept sorted by key).
 _ctx_key(comps::Vector{Comp}, params::Vector{Constraint}) = ((c.key for c in comps)..., _pkey(params))
 # A context made of exactly one block.

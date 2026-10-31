@@ -2,7 +2,7 @@ module Constants
 using Symbolics
 import DynamicQuantities as DQ
 import Base.MathConstants as MC
-import ModelingToolkit: constants
+import ModelingToolkit: @constants
 
 # Define custom metadata keys
 struct ConstantValue end

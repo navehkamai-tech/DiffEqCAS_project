@@ -2,7 +2,7 @@
 
 julia_version = "1.13.3"
 manifest_format = "2.1"
-project_hash = "311cfcad8a11a261c895fb99dddc4100522a1d1b"
+project_hash = "e75248c2c52e0ba4a2361831ec2804ff23593757"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -30,10 +30,10 @@ version = "0.5.4"
 
 [[deps.AbstractAlgebra]]
 deps = ["Compat", "LinearAlgebra", "MacroTools", "PrecompileTools", "Preferences", "Random", "RandomExtensions"]
-git-tree-sha1 = "989b62cb44d6b6b9868ef05e369abcbb2f8a1b59"
+git-tree-sha1 = "a8f39b9120627b06428a089604454937eb75abfb"
 registries = "General"
 uuid = "c3fe647b-3220-5bb0-a1ea-a7954cac585d"
-version = "0.51.2"
+version = "0.51.3"
 
     [deps.AbstractAlgebra.extensions]
     IJuliaExt = "IJulia"
@@ -432,7 +432,7 @@ version = "7.21.4"
     Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [[deps.DiffEqCAS]]
-deps = ["DataStructures", "DomainSets", "DynamicQuantities", "Integrals", "IntervalArithmetic", "IntervalBoxes", "JuliaInterpreter", "LRUCache", "LinearAlgebra", "ModelingToolkit", "Nemo", "SpecialFunctions", "StaticArrays", "SymbolicLimits", "SymbolicUtils", "Symbolics", "TermInterface", "Test"]
+deps = ["DataStructures", "DynamicQuantities", "Integrals", "IntervalArithmetic", "IntervalBoxes", "JuliaInterpreter", "LRUCache", "LinearAlgebra", "ModelingToolkit", "Nemo", "ReTestItems", "SpecialFunctions", "StaticArrays", "SymbolicLimits", "SymbolicUtils", "Symbolics", "TermInterface", "Test", "TestItems"]
 path = "."
 uuid = "2bd819c4-9fc0-462e-83be-792a2297597c"
 version = "0.1.0"
@@ -1705,6 +1705,13 @@ registries = "General"
 uuid = "fb686558-2515-59ef-acaa-46db3789a887"
 version = "0.4.4"
 
+[[deps.ReTestItems]]
+deps = ["Dates", "Logging", "Pkg", "Serialization", "Sockets", "Test", "TestEnv"]
+git-tree-sha1 = "8206667555bdce327c01477f91a4602a8824f9bb"
+registries = "General"
+uuid = "817f1d60-ba6b-4fd5-9520-3cf149f6a823"
+version = "1.35.3"
+
 [[deps.ReadOnlyArrays]]
 git-tree-sha1 = "e6f7ddf48cf141cb312b078ca21cb2d29d0dc11d"
 registries = "General"
@@ -2251,6 +2258,13 @@ version = "2.0.1"
 deps = ["InteractiveUtils", "Logging", "Random", "Serialization"]
 uuid = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 version = "1.11.0"
+
+[[deps.TestEnv]]
+deps = ["Pkg"]
+git-tree-sha1 = "1caf5cc94b2159567af1e50037d7e77024ba3537"
+registries = "General"
+uuid = "1e6cf692-eddd-4d53-88a5-2d735e33781b"
+version = "1.103.7"
 
 [[deps.TestItems]]
 git-tree-sha1 = "a6dd904babc04670c784f81b67957a3545271610"

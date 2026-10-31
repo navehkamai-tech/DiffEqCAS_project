@@ -15,7 +15,7 @@ const normalization_rules = [
         * ~n::is_even) => cos(~x)),
     # Hyperbolic Trig Normalization
     # 3. Exact Rational Normalization
-    @rule(~n::AbstractFloat => rationalize(~n)),
+    @rule(~n::is_float => rationalize(~n)),
     @rule(inv(~n::is_rational) => simplify(1//(~n)))
 ]
 
@@ -27,6 +27,29 @@ end
 
 function normalize_expr(expr::Expr)
     return simplify(NORMALIZER(expr))
+end
+
+test = 0
+
+function SymRelation(residual, relation; limits=ExpansionLimits())
+    rel = _relation_symbol(relation)
+    res = _as_num(normalize_expr(residual))
+    res = _as_num(_expand_residual(res, limits))
+    res = Symbolics.simplify(res)
+    type = _classify_residual(res, rel)
+    type in (:d, :i, :p) && ((res, rel) = _canonicalize(res, rel))
+    key = hash(Symbolics.unwrap(res), hash(rel))
+    return SymRelation(res, rel, type, key)
+end
+
+# `x > 1`  ->  SymRelation(x - 1, _GT)
+function SymRelation(expr::Symbolics.Num)
+    unwrapped = Symbolics.unwrap(expr)
+    SU.iscall(unwrapped) ||
+        throw(ArgumentError("must be an expression"))
+    op = _relation_symbol(SU.operation(unwrapped); error_message="a SymRelation must be a relation such as `x > 0`, got")
+    lhs, rhs = SU.arguments(unwrapped)
+    return SymRelation(wrap(lhs) - wrap(rhs), op)
 end
 
 #--------------------------------------------------------------------------
@@ -44,12 +67,6 @@ mutable struct Abstraction
     regions::Vector{Region}          # creation order == dependency order
     index::Dict{Any,Int}             # abstracted expr -> position in regions
     by_dummy::Dict{Any,Int}          # dummy -> position in regions
-end
-
-struct Warning
-    eq_index::Int
-    symbol::Symbol
-    message::String
 end
 
 Abstraction() = Abstraction(Region[], Dict{Any,Int}(), Dict{Any,Int}())
@@ -291,7 +308,7 @@ function _needs_safe_expand(expr)
     op = SU.operation(expr)
     args = SU.arguments(expr)
     if op isa Function && !(op isa SU.Differential) && !(op in ALGEBRAIC_OPS)
-        all(_is_leafish, args) || return true
+        all(_atomic, args) || return true
     end
     return any(_needs_safe_expand, args)
 end
@@ -403,3 +420,43 @@ and for expressions with dependent variables (like x(t), y(t), etc.) and their d
 the former is what's needed for combating the dependency problem in satisfiability.jl and paving.jl,
 while the latter will be needed in simplification.jl for simplifying differential equations.
 =#
+
+function _expr_to_poly(expr::Symbolics.Num)
+    u=unwrap(expr)
+    #=plan: first traversal to classify all atoms that need to be mapped to polynomial variables.
+    then, after constructing the polynomial ring, a second traversal to replace those atoms with the polynomial variables.
+    finally, return the polynomial and the mapping from polynomial variables to original atoms.
+    =#
+    atom_map = Dict{Any,Any}()
+    # first traversal to classify atoms
+    classify_atoms(u, atom_map)
+    R, vars = Nemo.PolyRing(Nemo.QQ, ["x$i" for i in 1:length(atom_map)])
+    # second traversal to replace atoms with polynomial variables
+    poly_expr = _poly_replace(u, atom_map, vars)
+    return R(poly_expr), atom_map
+end
+
+function classify_atoms(expr::Symbolics.Num, atom_map::Dict{Any,Any})
+    if _atomic(expr)
+        # If it's a leaf node (like a variable or constant), add it to the map
+        atom_map[expr] = nothing  # Placeholder for now
+        return
+    end
+
+    # Recursively classify arguments
+    for arg in SU.arguments(expr)
+        classify_atoms(arg, atom_map)
+    end
+end
+
+function _poly_replace(expr::Symbolics.Num, atom_map::Dict{Any,Any}, vars)
+    if haskey(atom_map, expr)
+        # Replace the atom with the corresponding polynomial variable
+        idx = findfirst(isequal(expr), keys(atom_map))
+        return vars[idx]
+    end
+
+    # Recursively replace arguments
+    new_args = [_poly_replace(arg, atom_map, vars) for arg in SU.arguments(expr)]
+    return maketerm(typeof(expr), SU.operation(expr), new_args, SU.metadata(expr))
+end

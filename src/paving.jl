@@ -51,30 +51,7 @@ struct _TapeInstruction
     arg2::Int      # For n-ary (+, *), end index in `nary_args`; for OP_POW_INT, integer exponent
 end
 
-"""
-    MVFPlan
- 
-Per-tape mean-value state. `multi` is static. `vars`/`dtapes` (parallel; the
-variables the form is applied to, cheapest derivative first) are filled lazily by
-`_mvf_build!`. `state`: 0 not built, 1 ready, -1 unusable. `fails`/`skip` drive
-the back-off; `tries`/`hits` are diagnostics (see `_mvf_report`).
-The counters are plain fields: sharing one prepared system across threads can
-make them inexact, which only affects the heuristic, never soundness.
-"""
-mutable struct MVFPlan <: _AbstractMVFPlan
-    residual::Symbolics.Num
-    variables::Vector
-    multi::Vector{Int}
-    lock::ReentrantLock
-    state::Threads.Atomic{Int}
-    vars::Vector{Int}
-    dtapes::Vector{CompiledHC4}
-    need_len::Int
-    fails::Int
-    skip::Int
-    tries::Int
-    hits::Int
-end
+abstract type _AbstractMVFPlan end
 
 """
     CompiledHC4
@@ -93,13 +70,38 @@ struct CompiledHC4
     confine::_BI
     rel::Symbol
     tape_len::Int
-    mvf::Union{Nothing,MVFPlan}
+    mvf::Union{Nothing,_AbstractMVFPlan}
 end
 
 struct _Prepared
     tapes::Vector{CompiledHC4}
     dropped::Bool            # some constraint was NOT compiled -> `:sat` is off the table
     max_len::Int             # workspace length needed
+end
+
+"""
+    MVFPlan
+ 
+Per-tape mean-value state. `multi` is static. `vars`/`dtapes` (parallel; the
+variables the form is applied to, cheapest derivative first) are filled lazily by
+`_mvf_build!`. `state`: 0 not built, 1 ready, -1 unusable. `fails`/`skip` drive
+the back-off; `tries`/`hits` are diagnostics (see `_mvf_report`).
+The counters are plain fields: sharing one prepared system across threads can
+make them inexact, which only affects the heuristic, never soundness.
+"""
+mutable struct MVFPlan
+    residual::Symbolics.Num
+    variables::Vector
+    multi::Vector{Int}
+    lock::ReentrantLock
+    state::Threads.Atomic{Int}
+    vars::Vector{Int}
+    dtapes::Vector{CompiledHC4}
+    need_len::Int
+    fails::Int
+    skip::Int
+    tries::Int
+    hits::Int
 end
 
 const _NO_TAPES = _Prepared(CompiledHC4[], false, 0)
@@ -185,7 +187,7 @@ function compile_hc4(relation::SymRelation, variables; mvf::Bool=false)
 end
 
 # Same tape, with a mean-value plan attached.
-_with_mvf(t::CompiledHC4, plan::_AbstractMVFPlan) =
+_with_mvf(t::CompiledHC4, plan::MVFPlan) =
     CompiledHC4(t.num_vars, t.constants, t.instructions, t.nary_args, t.root_idx,
         t.confine, t.rel, t.tape_len, plan)
 
