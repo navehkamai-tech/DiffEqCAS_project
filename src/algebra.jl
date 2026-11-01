@@ -22,20 +22,20 @@ const normalization_rules = [
 const NORMALIZER = SU.Postwalk(SU.PassThrough(SU.Chain(normalization_rules)))
 
 function normalize_expr(expr::Symbolics.Num)
-    return wrap(simplify(NORMALIZER(unwrap(expr))))
+    return wrap(NORMALIZER(unwrap(expr)))
 end
 
-function normalize_expr(expr::Expr)
-    return simplify(NORMALIZER(expr))
+function normalize_expr(expr::SUType)
+    return NORMALIZER(expr)
 end
 
 test = 0
 
 function SymRelation(residual, relation; limits=ExpansionLimits())
     rel = _relation_symbol(relation)
-    res = _as_num(normalize_expr(residual))
+    res = _as_num(normalize_expr(simplify(residual)))
     res = _as_num(_expand_residual(res, limits))
-    res = Symbolics.simplify(res)
+    res = normalize_expr(simplify(res))
     type = _classify_residual(res, rel)
     type in (:d, :i, :p) && ((res, rel) = _canonicalize(res, rel))
     key = hash(Symbolics.unwrap(res), hash(rel))
@@ -75,7 +75,7 @@ Abstraction() = Abstraction(Region[], Dict{Any,Int}(), Dict{Any,Int}())
 function _intern!(ab::Abstraction, new_expr)
     i = get!(ab.index, new_expr) do
         n = length(ab.regions) + 1
-        d = SU.Sym{Real}(Symbol("_D_", n))  # can't collide with user names
+        d = SU.Sym{SU.SymReal}(Symbol("_D_", n); type=Real, shape=SU.ShapeVecT())
         push!(ab.regions, Region(d, new_expr, 0, :converged))
         ab.by_dummy[d] = n
         n
@@ -289,7 +289,7 @@ bounded_expand(expr, budget::ExpansionBudget) = only(bounded_expand([expr], budg
 Takes and returns an unwrapped expression.
 """
 function expand_derivatives_bounded(expr, limits::ExpansionLimits)
-    cand = Symbolics.unwrap(expand_derivatives(Symbolics.wrap(expr), simplify=true))
+    cand = unwrap(expand_derivatives(wrap(expr), simplify=true))
     return _size(cand) >= limits.max_derivative_nodes ? expr : cand
 end
 
@@ -307,7 +307,7 @@ function _needs_safe_expand(expr)
     _is_transparent_diff(expr) && return false
     op = SU.operation(expr)
     args = SU.arguments(expr)
-    if op isa Function && !(op isa SU.Differential) && !(op in ALGEBRAIC_OPS)
+    if op isa Function && !(op isa Symbolics.Differential) && !(op in ALGEBRAIC_OPS)
         all(_atomic, args) || return true
     end
     return any(_needs_safe_expand, args)

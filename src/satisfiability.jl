@@ -7,8 +7,6 @@ _decided(i::Evidence, want) = all(w -> _answer(i, w) !== Undetermined, want)
 
 _to_answer(s::Symbol)::Answer = s === :sat ? Yes : s === :unsat ? No : Undetermined
 
-_make_box(ivs::Vector{_BI}) = IntervalBox(ivs)
-
 function _with(i::Evidence; outer=i.outer, strict_lo=i.strict_lo, strict_hi=i.strict_hi,
     neg=i.neg, zero=i.zero, pos=i.pos, ident_zero=i.ident_zero)
     return Evidence(outer, strict_lo, strict_hi, neg, zero, pos, ident_zero)
@@ -449,8 +447,8 @@ function _combine(op, args, kids::Vector{Evidence})::Evidence
 end
 
 function _derive(u, ctx::Ctx)::Evidence
+    v = _as_num(u)
     for comp in ctx.comps
-        v = _as_num(u)
         _in(v, comp.variables) && return _leaf_evidence(v, comp)
     end
     SU.iscall(u) || return Evidence()                       # unconstrained symbol / parameter
@@ -479,7 +477,7 @@ function _infer_evidence(u, ctx::Ctx)::Evidence
     c = _const_value(u)
     c !== nothing && return _literal_evidence(c)
     hit = get(cache, _ekey(u, ctx.key), nothing)
-    hit !== nothing && _decided(hit, _ALL) && return hit
+    (hit !== nothing && _decided(hit, _ALL)) && return hit
     return _store!(u, ctx.key, _derive(u, ctx))
 end
 
@@ -584,7 +582,8 @@ function _expr_evidence(expr, ctx::Ctx, want::Tuple)::Evidence
             !contracted.prep.dropped && !isempty(contracted.prep.tapes)
             # The probe is first, so tape 1 and its residual are the equality
             # being queried. Do not build a certificate if anything was dropped.
-            cert = _ZeroCertificate(probe.relation.residual, sys.variables, contracted.prep.tapes[1])
+            cert = _ZeroCertificate(probe.relation.residual, sys.variables,
+                contracted.prep.tapes[1]; others=contracted.prep.tapes[2:end])
             ans = _to_answer(_pave_contracted(contracted; certify=cert))
         else
             ans = _to_answer(_pave_contracted(contracted))
@@ -710,6 +709,8 @@ require a single argument, so would have to be defined inside the context of ano
 these could still make it a bit simpler I suppose
 =#
 
+# note: has an error that I'm not fixing right now, since I haven't updated the function in a while and will need to get back to it.
+# the relevant testitem is "sat: DESys helpers"
 """
 Return syntactic numerator-factor candidates shared by every addend.
 This function deliberately does not decide whether a factor is cancellable. It

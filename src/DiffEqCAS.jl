@@ -23,6 +23,7 @@ using IntervalArithmetic
 import Symbolics: unwrap, wrap, jacobian, simplify, substitute, get_variables
 import SymbolicUtils as SU
 import SymbolicUtils: maketerm, @rule, @acrule
+const SUType = SymbolicUtils.BasicSymbolicImpl.var"typeof(BasicSymbolicImpl)"
 import Base.MathConstants as MC
 import IntervalArithmetic: Interval, BareInterval, interval, intersect_interval, isempty_interval, emptyinterval, entireinterval, bareinterval, isentire_interval, isempty_interval, inf, sup, pow
 # ---------------------------------------------------------------------------

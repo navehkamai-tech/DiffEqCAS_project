@@ -518,8 +518,6 @@ end
     end
 end
 
-# everything up to here works!
-
 @testitem "sat: Evidence helpers and lattice" tags=[:satisfiability, :evidence] setup=[SatSetup] begin
     using Symbolics, Random
     @testset "_answer / _decided / _with / _set_answer" begin
@@ -1138,7 +1136,7 @@ end
     end
 end
 
-@testitem "sat: randomized soundness against sampling" tags=[:satisfiability, :property, :slow] setup=[SatSetup] begin
+@testitem "sat: randomized soundness against sampling regular" tags=[:satisfiability, :property, :slow] setup=[SatSetup] begin
     using Symbolics, Random
     rng = MersenneTwister(20261029)
     exprs = [x + y, x - y, x * y, x^2 - y, x * y - 1, exp(x) - y, abs(x) - 1,
@@ -1179,6 +1177,78 @@ end
             end
         end
     end
+end
+
+@testitem "sat: randomized soundness against sampling summarized" tags=[:satisfiability, :property, :slow] setup=[SatSetup] begin
+    using Symbolics, Random
+    rng = MersenneTwister(20261029)
+    exprs = [x + y, x - y, x * y, x^2 - y, x * y - 1, exp(x) - y, abs(x) - 1,
+        (x - 1) * (x + 1), x / (y^2 + 1), sin(x) - y, x^3 - x, atan(x) - y, log(y^2 + 1) - x]
+
+    failures = NamedTuple[]
+    # record a failure with full context instead of just a bare @test
+    function check!(ok, what; trial, ctxname, e, ev, cs, pt=nothing, v=nothing, box)
+        ok || push!(failures, (; what, trial, ctxname, e, cs, outer=ev.outer,
+            neg=ev.neg, zero=ev.zero, pos=ev.pos, pt, v, box))
+        return ok
+    end
+
+    CAS.clear_cache!()
+    for trial in 1:10
+        x0 = 6 * rand(rng) - 3
+        x1 = x0 + 0.1 + 3 * rand(rng)
+        y0 = 6 * rand(rng) - 3
+        y1 = y0 + 0.1 + 3 * rand(rng)
+        box = [C(x - x0, >=), C(x1 - x, >=), C(y - y0, >=), C(y1 - y, >=)]
+        coupled = vcat(box, [C(x - y, >=)])
+        boxdesc = (x=(x0, x1), y=(y0, y1))
+
+        pts = [(a, b) for a in (x0, x1) for b in (y0, y1)]
+        for _ in 1:120
+            push!(pts, (x0 + (x1 - x0) * rand(rng), y0 + (y1 - y0) * rand(rng)))
+        end
+
+        for (ctxname, cs, feasible) in (("box", box, p -> true), ("coupled", coupled, p -> p[1] >= p[2]))
+            P = filter(feasible, pts)
+            isempty(P) && continue
+            CAS.clear_cache!()
+            for e in exprs
+                ev = CAS.expr_evidence(e, cs)
+                kw = (; trial, ctxname, e, ev, cs, box=boxdesc)
+                check!(!iv_empty(ev.outer), "outer empty in feasible context"; kw...)
+                for (px, py) in P
+                    v = evalf(e, x => px, y => py)
+                    (v === nothing || !isfinite(v)) && continue
+                    tol = 1e-9 * (1 + abs(v))
+                    kwp = (; kw..., pt=(px, py), v)
+                    check!(_inf(ev.outer) - tol <= v <= _sup(ev.outer) + tol, "enclosure"; kwp...)
+                    ev.neg === No && check!(v >= -tol, "neg===No but v < 0"; kwp...)
+                    ev.pos === No && check!(v <= tol, "pos===No but v > 0"; kwp...)
+                    ev.zero === No && check!(v != 0, "zero===No but v == 0"; kwp...)
+                end
+                ev.neg === Yes && check!(_inf(ev.outer) < 0, "neg===Yes but outer has no negatives"; kw...)
+                ev.pos === Yes && check!(_sup(ev.outer) > 0, "pos===Yes but outer has no positives"; kw...)
+                ev.zero === Yes && check!(iv_in(0.0, ev.outer), "zero===Yes but 0 not in outer"; kw...)
+            end
+        end
+    end
+
+    if !isempty(failures)
+        println("\n===== $(length(failures)) soundness failures =====")
+        # which check, and which expression, are responsible?
+        for (label, key) in (("by check", f -> f.what), ("by expr", f -> string(f.e)),
+            ("by context", f -> f.ctxname))
+            println("\n--- $label ---")
+            counts = Dict{String,Int}()
+            for f in failures; counts[key(f)] = get(counts, key(f), 0) + 1; end
+            for (k, n) in sort(collect(counts); by=last, rev=true)
+                println(rpad(k, 50), n)
+            end
+        end
+        println("\n--- first 5 in detail ---")
+        foreach(f -> (display(f); println()), first(failures, 5))
+    end
+    @test isempty(failures)
 end
 
 @testitem "sat: DESys helpers" tags=[:satisfiability, :sys] setup=[SatSetup] begin
@@ -1314,7 +1384,8 @@ end
         t = CAS.compile_hc4(mk(x^2 - y, >=), [x, y])
         @test any(i -> i.op == CAS.OP_POW_INT && i.arg2 == 2, t.instructions)
         t = CAS.compile_hc4(mk(x^-2 - y, >=), [x, y])
-        @test any(i -> i.op == CAS.OP_POW_INT && i.arg2 == -2, t.instructions)
+        @test any(i -> i.op == CAS.OP_POW_INT && i.arg2 == 2, t.instructions)
+        @test any(i -> i.op == CAS.OP_DIV, t.instructions)
         t = CAS.compile_hc4(mk(x^0.5 - y, >=), [x, y])
         @test any(i -> i.op == CAS.OP_POW, t.instructions)
         t = CAS.compile_hc4(mk(x^y - 1, >=), [x, y])

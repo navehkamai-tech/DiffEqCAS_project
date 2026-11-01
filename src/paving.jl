@@ -1,4 +1,6 @@
 # paving specific utils
+_make_box(ivs::Vector{_BI}) = IntervalBox(Tuple(interval.(ivs)))
+
 _box_contains(x, box) = all(k -> in_interval(x[k], _bi(box[k])), eachindex(x))
 # True iff every coordinate is a nonempty degenerate interval [a, a].
 function _is_point(box)
@@ -89,7 +91,7 @@ the back-off; `tries`/`hits` are diagnostics (see `_mvf_report`).
 The counters are plain fields: sharing one prepared system across threads can
 make them inexact, which only affects the heuristic, never soundness.
 """
-mutable struct MVFPlan
+mutable struct MVFPlan <: _AbstractMVFPlan
     residual::Symbolics.Num
     variables::Vector
     multi::Vector{Int}
@@ -278,7 +280,7 @@ function _compile_hc4_residual(root_residual, rel::Symbol, variables)
     confine = _give_confine(rel)
     tape_len = num_vars + num_consts + length(call_nodes)
 
-    return CompiledHC4(num_vars, constants, instructions, nary_args, root_idx, confine, rel, tape_len)
+    return CompiledHC4(num_vars, constants, instructions, nary_args, root_idx, confine, rel, tape_len, nothing)
 end
 
 """
@@ -604,7 +606,7 @@ end
 end
 
 # --- forward pass (generic over bare / decorated workspace) -----------------
-@inline _forward_pow_int(x::_BI, n::Int) = pow(x, n)
+@inline _forward_pow_int(x::_BI, n::Int) = pown(x, n)
 @inline _forward_pow_int(x::_DI, n::Int) = x^n
 
 # ---------------------------------------------------------------------------
@@ -612,6 +614,8 @@ end
 # ---------------------------------------------------------------------------
 
 function _execute_forward!(tape::CompiledHC4, workspace::Vector{W}) where {W}
+    #println("Tape is: ", tape)
+    #println("Workspace is: ", workspace)
     @inbounds begin
         for i in 1:length(tape.constants)
             workspace[tape.num_vars+i] = _lift(W, tape.constants[i])
@@ -1100,18 +1104,27 @@ _infeasible(n::Int) = _Contracted(:unsat, _BI[_empty_bi() for _ in 1:n], UInt64(
 # Certificates that prove a real zero exists in a candidate box
 # ---------------------------------------------------------------------------
 """
-    _ZeroCertificate(residual, variables, tape)
-
-Callable paving certificate for the probe `residual == 0`. It accepts a box only
-when all non-probe constraints have already been proved inside-and-defined and
-one of the existence tests (IVT or one-coordinate interval Newton) succeeds.
-The private decorated workspace is sized for derivative tapes too, since those
-can be longer than the original constraint tapes.
+    _ZeroCertificate(residual, variables, tape; others=nothing)
+ 
+`others` must be the compiled tapes of EVERY other constraint of the system
+(everything except the probe). With `others === nothing` inflation is disabled,
+so forgetting to pass it can only lose completeness, never soundness.
 """
 struct _ZeroCertificate
     tape::CompiledHC4
     dtapes::Vector{Union{Nothing,CompiledHC4}}
     scratch::Vector{_DI}
+    others::Union{Nothing,Vector{CompiledHC4}}
+end
+
+function _ZeroCertificate(residual, variables, tape::CompiledHC4;
+    others::Union{Nothing,Vector{CompiledHC4}}=nothing)
+    dtapes = Union{Nothing,CompiledHC4}[
+        _compile_zero_derivative(residual, variable, variables) for variable in variables
+    ]
+    max_len = maximum((t.tape_len for t in dtapes if t !== nothing); init=tape.tape_len)
+    max_len = max(max_len, tape.tape_len)
+    return _ZeroCertificate(tape, dtapes, Vector{_DI}(undef, max_len), others)
 end
 
 function _compile_zero_derivative(residual, variable, variables)
@@ -1124,15 +1137,6 @@ function _compile_zero_derivative(residual, variable, variables)
         (err isa InterruptException || err isa OutOfMemoryError) && rethrow()
         return nothing
     end
-end
-
-function _ZeroCertificate(residual, variables, tape::CompiledHC4)
-    dtapes = Union{Nothing,CompiledHC4}[
-        _compile_zero_derivative(residual, variable, variables) for variable in variables
-    ]
-    max_len = maximum((t.tape_len for t in dtapes if t !== nothing); init=tape.tape_len)
-    max_len = max(max_len, tape.tape_len)
-    return _ZeroCertificate(tape, dtapes, Vector{_DI}(undef, max_len))
 end
 
 # Evaluate a tape over bare input intervals using decorated interval arithmetic.
@@ -1224,22 +1228,74 @@ function _zero_newton(cert::_ZeroCertificate, boxivs::Vector{_BI})::Bool
     return false
 end
 
-# Callable hook accepted by _pave_core. Bit zero is the equality probe; every
-# other active constraint must already be inside-and-defined on the whole box.
-function (cert::_ZeroCertificate)(box, mask::UInt64, _ws::Vector{_BI}, _dws::Vector{_DI})::Bool
+# Relative inflation levels, tried smallest first.
+const _ZERO_INFLATE_LEVELS = (1e-12, 1e-9, 1e-6)
+
+# Existence tests on ONE box: the residual must be defined and continuous on the
+# whole box (decoration >= dac), then IVT or interval Newton must succeed.
+function _zero_certify_box(cert::_ZeroCertificate, boxivs::Vector{_BI})::Bool
+    whole = _zero_eval(cert.tape, boxivs, cert.scratch)
+    whole === nothing && return false
+    decoration(whole) >= dac || return false
+    _zero_ivt(cert, boxivs) && return true
+    return _zero_newton(cert, boxivs)
+end
+
+# Grow every coordinate whose width is already at the level's resolution:
+#   width <= rel * scale   =>   new width <= width + 2*delta <= 3 * rel * scale
+# Coordinates that are already wide, degenerate or unbounded are left alone.
+# Returns `nothing` if nothing grew. Rounded outward, so the result strictly
+# contains the input box.
+function _zero_inflate(boxivs::Vector{_BI}, rel::Float64)::Union{Nothing,Vector{_BI}}
+    out = copy(boxivs)
+    grew = false
+    for k in eachindex(boxivs)
+        lo, hi = inf(boxivs[k]), sup(boxivs[k])
+        (isfinite(lo) && isfinite(hi) && lo < hi) || continue
+        delta = rel * max(abs(lo), abs(hi))
+        (delta > 0.0 && hi - lo <= delta) || continue
+        out[k] = _bi(prevfloat(lo - delta), nextfloat(hi + delta))
+        grew = true
+    end
+    return grew ? out : nothing
+end
+
+# Is EVERY non-probe constraint inside-and-defined on the whole box?
+# This is rechecked from scratch on the inflated box. The mask bits that were
+# cleared earlier only speak for the smaller box.
+function _zero_others_inside(cert::_ZeroCertificate, boxivs::Vector{_BI},
+    dws::Vector{_DI})::Bool
+    cert.others === nothing && return false
+    ibox = _make_box(boxivs)
+    for t in cert.others
+        length(dws) >= t.tape_len || return false
+        _inside_and_defined(t, ibox, dws) || return false
+    end
+    return true
+end
+
+function (cert::_ZeroCertificate)(box, mask::UInt64, _ws::Vector{_BI}, dws::Vector{_DI})::Bool
     mask == 0 && return true
     (mask & ~UInt64(1)) == 0 || return false
     boxivs = _BI[_bi(box[i]) for i in 1:length(box)]
 
-    # A decorated enclosure with decoration >= dac certifies definedness and
-    # continuity of the residual on the entire box (def alone is insufficient).
-    whole = _zero_eval(cert.tape, boxivs, cert.scratch)
-    whole === nothing && return false
-    decoration(whole) >= dac || return false
+    # 1. The box as given (unchanged behaviour).
+    _zero_certify_box(cert, boxivs) && return true
 
-    _zero_ivt(cert, boxivs) && return true
-    return _zero_newton(cert, boxivs)
+    # 2. The box is at float resolution: try slightly larger boxes, each one
+    #    fully verified. Soundness never depends on how much we grew.
+    cert.others === nothing && return false
+    for rel in _ZERO_INFLATE_LEVELS
+        bigger = _zero_inflate(boxivs, rel)
+        bigger === nothing && continue
+        # Levels are nested (bigger level => superset box), and "inside" on a
+        # superset implies "inside" on every subset, so one failure ends the search.
+        _zero_others_inside(cert, bigger, dws) || return false
+        _zero_certify_box(cert, bigger) && return true
+    end
+    return false
 end
+
 
 """
     _contract(box, constraints, variables; ratio) -> _Contracted

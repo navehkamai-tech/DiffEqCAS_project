@@ -24,15 +24,15 @@ _inv(c) = c isa Integer ? 1//c : inv(c)
 function _is_atomic(a)
     SU.iscall(a) || return true
     op = SU.operation(a)
-    op isa SU.Symbolic && return true     # unknown function x(t)
-    op isa SU.Differential &&
+    op isa SU.BasicSymbolic && return true     # unknown function x(t)
+    op isa Symbolics.Differential &&
         return _is_atomic(SU.arguments(a)[1])
     return false
 end
 
 function _is_transparent_diff(expr)
     op = SU.operation(expr)
-    return op isa SU.Differential &&
+    return op isa Symbolics.Differential &&
         _is_atomic(SU.arguments(expr)[1])
 end
 
@@ -113,7 +113,7 @@ end
 
 function _has_derivative(expr)
     SU.iscall(expr) || return false
-    SU.operation(expr) isa SU.Differential && return true
+    SU.operation(expr) isa Symbolics.Differential && return true
     return any(_has_derivative, SU.arguments(expr))
 end
 
@@ -122,7 +122,7 @@ function _has_depvar(expr)
     SU.iscall(expr) || return false          # bare leaf: independent/parameter/constant
     op = SU.operation(expr)
     args = SU.arguments(expr)
-    op isa SU.Differential && return _has_depvar(args[1])
+    op isa Symbolics.Differential && return _has_depvar(args[1])
     op isa SU.Symbolic && return _var_kind(expr) === :d   # x(t) vs p(t)
     return any(_has_depvar, args)
 end
