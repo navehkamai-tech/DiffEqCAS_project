@@ -1898,15 +1898,18 @@ end
 
 @testitem "paving: zero certificates" tags=[:paving, :certificate] setup=[SatSetup] begin
     using Symbolics, Random
-    function mkcert(residual_num, vars, tape_rel)
+    function mkcert(residual, vars, tape_rel)
         tape = CAS.compile_hc4(tape_rel, vars)
-        return CAS._ZeroCertificate(tape_rel.residual, vars, tape), tape
+        return CAS._ZeroCertificate(residual, vars, tape), tape
     end
+
     rel = mk(x - 1, ==)
     cert, tape = mkcert(rel.residual, [x], rel)
     ws = Vector{CAS._BI}(undef, tape.tape_len)
     dws = Vector{CAS._DI}(undef, tape.tape_len)
     probe = UInt64(1)                                        # bit zero is the probe
+    ptsign(c, p) = CAS._zero_point_sign(c, CAS._BI[bi(p)])   # rigorous sign of the residual at a float
+    newws(t) = (Vector{CAS._BI}(undef, t.tape_len), Vector{CAS._DI}(undef, t.tape_len))
 
     @testset "construction" begin
         @test length(cert.dtapes) == 1 && cert.dtapes[1] !== nothing
@@ -1945,6 +1948,164 @@ end
         d = Vector{CAS._DI}(undef, tl.tape_len)
         @test !cl(boxof(bi(-1.0, 2.0)), probe, w, d)
         @test cl(boxof(bi(0.5, 2.0)), probe, w, d)
+    end
+
+    # -----------------------------------------------------------------------
+    # Soundness is the contract: a certificate may say `false` whenever it likes,
+    # but it must never say `true` for a box without a root. The sets below hammer
+    # on that, and check completeness only where plain endpoint-sign / Newton
+    # reasoning has to succeed.
+    # -----------------------------------------------------------------------
+    @testset "point signs: several variables, variable order" begin
+        # expected signs come from `residual` itself: canonicalisation may negate it
+        r2 = mk(x - 2y, ==)
+        sgn(kv...) = sign(evalf(r2.residual, kv...))
+        for vars in ([x, y], [y, x])
+            c2, _ = mkcert(r2.residual, vars, r2)
+            @test length(c2.dtapes) == 2 && all(!isnothing, c2.dtapes)
+            val = Dict(x => 5.0, y => 1.0)
+            ivs = CAS._BI[bi(val[v]) for v in vars]
+            @test CAS._zero_point_sign(c2, ivs) == sgn(x => 5.0, y => 1.0)
+            # feeding the values in the other order must evaluate a different point
+            @test CAS._zero_point_sign(c2, reverse(ivs)) == sgn(x => 1.0, y => 5.0)
+        end
+        c2, _ = mkcert(r2.residual, [x, y], r2)
+        @test CAS._zero_point_sign(c2, CAS._BI[bi(2.0), bi(1.0)]) == 0          # exactly on the plane
+    end
+
+    @testset "point signs are never wrong (random points)" begin
+        rng = MersenneTwister(30)
+        rc = mk(x^3 - 2x + 0.5, ==)
+        cc, _ = mkcert(rc.residual, [x], rc)
+        decided = 0
+        for _ in 1:300
+            px = 6 * rand(rng) - 3
+            v = evalf(rc.residual, x => px)
+            (v === nothing || abs(v) < 1e-6) && continue      # too close to zero for float to be the referee
+            decided += 1
+            @test ptsign(cc, px) == sign(v)                    # far from zero the sign must be decided, and right
+        end
+        @test decided > 200
+    end
+
+    @testset "soundness (and sign-change completeness) against known roots" begin
+        rng = MersenneTwister(31)
+        cases = [
+            ("x^2 - 2", mk(x^2 - 2, ==), [-sqrt(2.0), sqrt(2.0)]),
+            ("x^3 - 3x + 1", mk(x^3 - 3x + 1, ==), [2cos(2pi / 9), 2cos(8pi / 9), 2cos(14pi / 9)]),
+            ("sin(x)", mk(sin(x), ==), [-Float64(pi), 0.0, Float64(pi)]),
+        ]
+        for (name, r, roots) in cases
+            c, t = mkcert(r.residual, [x], r)
+            w, d = newws(t)
+            n_change = 0
+            for _ in 1:300
+                a, b = sort([8 * rand(rng) - 4, 8 * rand(rng) - 4])
+                b - a < 1e-3 && continue
+                ivs = CAS._BI[bi(a, b)]
+                has_root = any(rt -> a - 1e-9 <= rt <= b + 1e-9, roots)
+                ivt = CAS._zero_ivt(c, ivs)
+                newt = CAS._zero_newton(c, ivs)
+                hook = c(boxof(bi(a, b)), probe, w, d)
+                @test !ivt || has_root                         # soundness: every entry point
+                @test !newt || has_root
+                @test !hook || has_root
+                if ptsign(c, a) * ptsign(c, b) == -1           # a clear sign change of a continuous function
+                    n_change += 1
+                    @test ivt
+                    @test hook
+                end
+            end
+            @test n_change >= 20                               # the completeness check is not vacuous
+        end
+    end
+
+    @testset "root-free functions are never certified" begin
+        free = [
+            (mk(x^2 + 1, ==), [x], [boxof(bi(-3.0, 3.0)), boxof(bi(0.0, 0.5)), boxof(bi(-Inf, Inf))]),
+            # inf of exp is approached, never attained: the sign at -Inf is "zero", which is not a sign
+            (mk(exp(x), ==), [x], [boxof(bi(-50.0, 0.0)), boxof(bi(-Inf, 0.0)), boxof(bi(-3.0, 3.0))]),
+            (mk(x^2 + y^2 + 1, ==), [x, y], [boxof(bi(-2.0, 2.0), bi(-2.0, 2.0))]),
+        ]
+        for (r, vars, boxes) in free
+            c, t = mkcert(r.residual, vars, r)
+            w, d = newws(t)
+            for B in boxes
+                ivs = CAS._BI[ivof(B, i) for i in 1:length(vars)]
+                @test !c(B, probe, w, d)
+                @test !CAS._zero_ivt(c, ivs)
+                @test !CAS._zero_newton(c, ivs)
+            end
+        end
+    end
+
+    @testset "a sign change across a pole is not a root" begin
+        # both endpoints have opposite signs, yet the function is not continuous on the box
+        for (r, lo, hi) in ((mk(1 / x, ==), -1.0, 1.0), (mk(tan(x), ==), 1.0, 2.0))
+            c, t = mkcert(r.residual, [x], r)
+            w, d = newws(t)
+            ivs = CAS._BI[bi(lo, hi)]
+            @test ptsign(c, lo) * ptsign(c, hi) == -1
+            @test !CAS._zero_ivt(c, ivs)
+            @test !CAS._zero_newton(c, ivs)
+            @test !c(boxof(bi(lo, hi)), probe, w, d)
+        end
+    end
+
+    @testset "interval Newton: both slope signs, roots outside the box" begin
+        r3 = mk(x^3 - 2, ==)                                          # root 2^(1/3) ≈ 1.26
+        c3, _ = mkcert(r3.residual, [x], r3)
+        @test CAS._zero_newton(c3, CAS._BI[bi(1.0, 2.0)])
+        @test CAS._zero_ivt(c3, CAS._BI[bi(1.0, 2.0)])                # a unique simple root is a sign change
+        @test !CAS._zero_newton(c3, CAS._BI[bi(1.5, 2.0)])            # root lies left of the box
+        @test !CAS._zero_newton(c3, CAS._BI[bi(0.5, 1.2)])            # root lies right of the box
+        @test !CAS._zero_newton(c3, CAS._BI[bi(-1.0, 2.0)])           # derivative contains 0
+
+        r4 = mk(2 - x^3, ==)                                          # same root, negative slope
+        c4, _ = mkcert(r4.residual, [x], r4)
+        @test CAS._zero_newton(c4, CAS._BI[bi(1.0, 2.0)])
+        @test !CAS._zero_newton(c4, CAS._BI[bi(-2.0, -1.0)])
+
+        r2 = mk(x^2 - 2, ==)
+        c2, _ = mkcert(r2.residual, [x], r2)
+        @test CAS._zero_newton(c2, CAS._BI[bi(1.3, 1.5)])             # a tight bracket certifies
+        @test !CAS._zero_newton(c2, CAS._BI[bi(1.5, 1.7)])            # nothing to find
+    end
+
+    @testset "the shared scratch does not leak between calls" begin
+        r = mk(x^3 - 3x + 1, ==)                                      # roots ≈ -1.879, 0.347, 1.532
+        c, t = mkcert(r.residual, [x], r)
+        w, d = newws(t)
+        boxes = [(-2.5, -1.5, true), (0.0, 1.0, true), (1.0, 2.0, true),
+            (1.6, 3.0, false), (-1.0, 0.0, false), (-4.0, -3.0, false)]
+        expected = [b[3] for b in boxes]
+        calls(order) = [c(boxof(bi(boxes[i][1], boxes[i][2])), probe, w, d) for i in order]
+        @test calls(1:6) == expected
+        @test calls(6:-1:1) == reverse(expected)                      # different order, same answers
+        @test calls(1:6) == expected                                  # asking again changes nothing
+        for b in boxes                                                # and a brand-new certificate agrees
+            c2, t2 = mkcert(r.residual, [x], r)
+            w2, d2 = newws(t2)
+            @test c2(boxof(bi(b[1], b[2])), probe, w2, d2) == b[3]
+        end
+    end
+
+    @testset "mask handling" begin
+        @test cert(boxof(bi(0.0, 2.0)), probe, ws, dws)               # probe is the only open constraint
+        @test !cert(boxof(bi(0.0, 2.0)), UInt64(0b10), ws, dws)       # some other constraint is open
+        @test !cert(boxof(bi(0.0, 2.0)), UInt64(0b11), ws, dws)
+        @test cert(boxof(bi(0.0, 2.0)), UInt64(0), ws, dws)           # nothing left to prove
+    end
+
+    @testset "plugged into _pave_core as the certify hook (soundness only)" begin
+        ratio = CAS.HC4_DEFAULT_RATIO
+        for (c, rooted) in ((C(x^2 - 2, ==), true), (C(x^2 + 1, ==), false))
+            prep = CAS._prepare([c], [x])
+            pws, pdws = CAS._workspaces(prep)
+            hook, _ = mkcert(c.relation.residual, [x], c.relation)
+            st = CAS._pave_core(boxof(bi(0.0, 4.0)), prep, pws, pdws, CAS._full_mask(1), 0.05, ratio; certify=hook)
+            rooted ? (@test st !== :unsat) : (@test st !== :sat)       # Undetermined is always acceptable
+        end
     end
 end
 

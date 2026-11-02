@@ -1159,31 +1159,30 @@ function _zero_point_sign(cert::_ZeroCertificate, point::Vector{_BI})::Int
     return sup(enclosure) < 0.0 ? -1 : inf(enclosure) > 0.0 ? 1 : 0
 end
 
-# Try the midpoint and the 2N points obtained by moving one coordinate to an
-# endpoint. Opposite certified signs imply a zero by continuity and convexity.
 function _zero_ivt(cert::_ZeroCertificate, boxivs::Vector{_BI})::Bool
+    whole = _zero_eval(cert.tape, boxivs, cert.scratch)
+    whole === nothing && return false
+    decoration(whole) >= dac || return false
+    return _zero_ivt_unchecked(cert, boxivs)
+end
+
+# Only valid when the caller has already established decoration(f(box)) >= dac.
+function _zero_ivt_unchecked(cert::_ZeroCertificate, boxivs::Vector{_BI})::Bool
     point = _BI[_bi(mid(iv)) for iv in boxivs]
     seen_neg = false
     seen_pos = false
-
-    s = _zero_point_sign(cert, point)
-    seen_neg |= s < 0
-    seen_pos |= s > 0
-    seen_neg && seen_pos && return true
-
+    @inline function probe!()
+        s = _zero_point_sign(cert, point)
+        seen_neg |= s < 0
+        seen_pos |= s > 0
+        return seen_neg && seen_pos
+    end
+    probe!()                              # midpoint only, can't fire alone
     for k in eachindex(boxivs)
         point[k] = _bi(inf(boxivs[k]))
-        s = _zero_point_sign(cert, point)
-        seen_neg |= s < 0
-        seen_pos |= s > 0
-        seen_neg && seen_pos && return true
-
+        probe!() && return true
         point[k] = _bi(sup(boxivs[k]))
-        s = _zero_point_sign(cert, point)
-        seen_neg |= s < 0
-        seen_pos |= s > 0
-        seen_neg && seen_pos && return true
-
+        probe!() && return true
         point[k] = _bi(mid(boxivs[k]))
     end
     return false
@@ -1237,7 +1236,7 @@ function _zero_certify_box(cert::_ZeroCertificate, boxivs::Vector{_BI})::Bool
     whole = _zero_eval(cert.tape, boxivs, cert.scratch)
     whole === nothing && return false
     decoration(whole) >= dac || return false
-    _zero_ivt(cert, boxivs) && return true
+    _zero_ivt_unchecked(cert, boxivs) && return true
     return _zero_newton(cert, boxivs)
 end
 
