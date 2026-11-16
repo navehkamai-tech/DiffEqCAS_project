@@ -1014,10 +1014,10 @@ version = "0.2.1"
 
 [[deps.JuliaInterpreter]]
 deps = ["CodeTracking", "InteractiveUtils", "Random"]
-git-tree-sha1 = "c35411a62b74a0288934ffcfad4fa8dd09b72630"
+git-tree-sha1 = "28cb2c1b2e8fe3a9aa50ac75f2eead535bc89f05"
 registries = "General"
 uuid = "aa1ae85d-cabe-5617-a682-6adf51b2e16a"
-version = "0.12.2"
+version = "0.12.3"
 
 [[deps.JuliaSyntaxHighlighting]]
 deps = ["StyledStrings"]
